@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"embed"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"image"
 	"image/color"
@@ -227,12 +228,12 @@ func openFileDialog(startDir string) string {
 	}
 	out, err := exec.Command("zenity", "--file-selection",
 		"--title=Open Playlist",
-		"--file-filter=M3U Playlist|*.m3u *.m3u8",
+		"--file-filter=Playlist|*.m3u *.m3u8 *.xspf",
 		"--filename="+startDir+"/").Output()
 	if err == nil {
 		return strings.TrimSpace(string(out))
 	}
-	out, err = exec.Command("kdialog", "--getopenfilename", startDir, "*.m3u *.m3u8").Output()
+	out, err = exec.Command("kdialog", "--getopenfilename", startDir, "*.m3u *.m3u8 *.xspf").Output()
 	if err == nil {
 		return strings.TrimSpace(string(out))
 	}
@@ -573,7 +574,16 @@ func (p *Player) setVolume(vol int) {
 }
 
 func (p *Player) loadPlaylist(filename string) bool {
-	tracks, err := parseM3U8(filename)
+	var tracks []Track
+	var err error
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == ".xspf" {
+		tracks, err = parseXSPF(filename)
+	} else {
+		tracks, err = parseM3U8(filename)
+	}
+
 	if err != nil || len(tracks) == 0 {
 		return false
 	}
@@ -620,4 +630,40 @@ func parseM3U8(filename string) ([]Track, error) {
 		}
 	}
 	return tracks, scanner.Err()
+}
+
+type xspfPlaylist struct {
+	XMLName   xml.Name   `xml:"playlist"`
+	TrackList xspfTracks `xml:"trackList"`
+}
+
+type xspfTracks struct {
+	Tracks []xspfTrack `xml:"track"`
+}
+
+type xspfTrack struct {
+	Location string `xml:"location"`
+	Title    string `xml:"title"`
+}
+
+func parseXSPF(filename string) ([]Track, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	var xspf xspfPlaylist
+	if err := xml.Unmarshal(data, &xspf); err != nil {
+		return nil, err
+	}
+
+	var tracks []Track
+	for _, t := range xspf.TrackList.Tracks {
+		name := t.Title
+		if name == "" {
+			name = filepath.Base(t.Location)
+		}
+		tracks = append(tracks, Track{Name: name, URL: t.Location})
+	}
+	return tracks, nil
 }
