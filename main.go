@@ -26,6 +26,8 @@ import (
 	"gioui.org/app"
 	"gioui.org/font"
 	"gioui.org/font/gofont"
+	"gioui.org/gesture"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -34,10 +36,24 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+	"time"
 )
 
 //go:embed icon.png
 var iconFS embed.FS
+
+// SwiftUI / iOS-inspired color palette
+var (
+	clrBg        = color.NRGBA{R: 242, G: 242, B: 247, A: 255} // iOS system background
+	clrSurface   = color.NRGBA{R: 255, G: 255, B: 255, A: 255} // card / row background
+	clrAccent    = color.NRGBA{R: 0, G: 122, B: 255, A: 255}   // iOS blue
+	clrLabel     = color.NRGBA{R: 28, G: 28, B: 30, A: 255}    // primary text
+	clrSecondary = color.NRGBA{R: 142, G: 142, B: 147, A: 255} // secondary text
+	clrSeparator = color.NRGBA{R: 198, G: 198, B: 200, A: 255} // divider
+	clrBtnBg     = color.NRGBA{R: 229, G: 229, B: 234, A: 255} // secondary button
+	clrWhite     = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	clrAccentFg  = color.NRGBA{R: 0, G: 122, B: 255, A: 18}    // accent tint for row highlight
+)
 
 type Track struct {
 	Name string
@@ -89,15 +105,18 @@ type Player struct {
 
 	pendingFile chan string
 
-	stationList widget.List
-	searchEdit  widget.Editor
-	volSlider   widget.Float
-	playBtn     widget.Clickable
-	muteBtn     widget.Clickable
-	randomBtn   widget.Clickable
-	openBtn     widget.Clickable
-	installBtn  widget.Clickable
-	stationBtns []widget.Clickable
+	stationList      widget.List
+	searchEdit       widget.Editor
+	volSlider        widget.Float
+	playBtn          widget.Clickable
+	muteBtn          widget.Clickable
+	randomBtn        widget.Clickable
+	openBtn          widget.Clickable
+	installBtn       widget.Clickable
+	installUbuntuBtn widget.Clickable
+	showInstallMenu  bool
+	stationBtns      []widget.Clickable
+	volScroll        gesture.Scroll // scroll-to-volume outside the list
 
 	window *app.Window
 }
@@ -174,7 +193,7 @@ func main() {
 		w := new(app.Window)
 		w.Option(
 			app.Title("Radio Player"),
-			app.Size(unit.Dp(400), unit.Dp(600)),
+			app.Size(unit.Dp(420), unit.Dp(640)),
 		)
 		p.window = w
 
@@ -228,12 +247,13 @@ func openFileDialog(startDir string) string {
 	}
 	out, err := exec.Command("zenity", "--file-selection",
 		"--title=Open Playlist",
-		"--file-filter=Playlist|*.m3u *.m3u8 *.xspf",
+		"--file-filter=Playlist Files (m3u, m3u8, xspf)|*.m3u *.m3u8 *.xspf",
+		"--file-filter=All Files|*",
 		"--filename="+startDir+"/").Output()
 	if err == nil {
 		return strings.TrimSpace(string(out))
 	}
-	out, err = exec.Command("kdialog", "--getopenfilename", startDir, "*.m3u *.m3u8 *.xspf").Output()
+	out, err = exec.Command("kdialog", "--getopenfilename", startDir, "*.m3u *.m3u8 *.xspf|Playlist Files (m3u, m3u8, xspf)").Output()
 	if err == nil {
 		return strings.TrimSpace(string(out))
 	}
@@ -286,15 +306,22 @@ func (p *Player) handleEvents(gtx layout.Context) {
 	}
 
 	if p.installBtn.Clicked(gtx) {
+		p.showInstallMenu = !p.showInstallMenu
+	}
+
+	if p.installUbuntuBtn.Clicked(gtx) {
+		p.showInstallMenu = false
 		go func() {
 			iconData, err := iconFS.ReadFile("icon.png")
 			if err == nil && installDesktopEntry(iconData) {
 				exec.Command("zenity", "--info",
 					"--title=Radio Player",
-					"--text=Desktop entry installed!\nRadio Player is now in your application menu.").Run()
+					"--width=420",
+					"--text=Desktop entry installed! Radio Player is now in your application menu.").Run()
 			} else {
 				exec.Command("zenity", "--error",
 					"--title=Radio Player",
+					"--width=420",
 					"--text=Installation failed. Check permissions.").Run()
 			}
 		}()
@@ -302,6 +329,7 @@ func (p *Player) handleEvents(gtx layout.Context) {
 
 	for i := range p.stationBtns {
 		if i < len(p.filteredList) && p.stationBtns[i].Clicked(gtx) {
+			p.showInstallMenu = false
 			p.playTrack(i)
 		}
 	}
@@ -316,6 +344,29 @@ func (p *Player) handleEvents(gtx layout.Context) {
 		}
 	}
 
+	// Scroll-to-volume: gesture registered on the top area in draw().
+	// Positive delta = scrolled down = quieter; negative = up = louder.
+	if scrollDelta := p.volScroll.Update(gtx.Metric, gtx.Source, time.Now(),
+		gesture.Vertical,
+		pointer.ScrollRange{},
+		pointer.ScrollRange{Min: -1e6, Max: 1e6},
+	); scrollDelta != 0 {
+		newVol := p.settings.Volume - scrollDelta/30
+		if newVol < 0 {
+			newVol = 0
+		} else if newVol > 100 {
+			newVol = 100
+		}
+		if newVol != p.settings.Volume {
+			p.settings.Volume = newVol
+			p.volSlider.Value = float32(newVol) / 100.0
+			if !p.isMuted {
+				p.setVolume(newVol)
+			}
+			saveSettings(p.settings)
+		}
+	}
+
 	newVol := int(p.volSlider.Value * 100)
 	if newVol != p.settings.Volume {
 		p.settings.Volume = newVol
@@ -326,124 +377,340 @@ func (p *Player) handleEvents(gtx layout.Context) {
 	}
 }
 
-var (
-	colorDivider = color.NRGBA{R: 180, G: 180, B: 180, A: 255}
-	colorBtnGrey = color.NRGBA{R: 180, G: 180, B: 180, A: 255}
-)
+// withBackground draws a rounded-rect background behind the given widget.
+func withBackground(gtx layout.Context, bg color.NRGBA, radius unit.Dp, w layout.Widget) layout.Dimensions {
+	macro := op.Record(gtx.Ops)
+	dims := w(gtx)
+	call := macro.Stop()
+	r := gtx.Dp(radius)
+	defer clip.RRect{
+		Rect: image.Rectangle{Max: dims.Size},
+		NW:   r, NE: r, SW: r, SE: r,
+	}.Push(gtx.Ops).Pop()
+	paint.Fill(gtx.Ops, bg)
+	call.Add(gtx.Ops)
+	return dims
+}
+
+// iconBtn draws a rounded-rectangle icon button with properly centred label.
+func iconBtn(gtx layout.Context, th *material.Theme, btn *widget.Clickable,
+	label string, bg, fg color.NRGBA, size unit.Dp, textSize unit.Sp) layout.Dimensions {
+	return btn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		s := gtx.Dp(size)
+		gtx.Constraints = layout.Exact(image.Point{X: s, Y: s})
+		r := gtx.Dp(unit.Dp(9)) // rounded rect, not full circle
+		defer clip.RRect{
+			Rect: image.Rectangle{Max: image.Point{X: s, Y: s}},
+			NW: r, NE: r, SW: r, SE: r,
+		}.Push(gtx.Ops).Pop()
+		paint.Fill(gtx.Ops, bg)
+		// Centre label both horizontally and vertically.
+		return layout.Stack{Alignment: layout.Center}.Layout(gtx,
+			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+				return layout.Dimensions{Size: gtx.Constraints.Max}
+			}),
+			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Body1(th, label)
+				lbl.Color = fg
+				lbl.TextSize = textSize
+				return lbl.Layout(gtx)
+			}),
+		)
+	})
+}
+
+// thinDivider draws a single-pixel separator line.
+func thinDivider(gtx layout.Context) layout.Dimensions {
+	size := image.Point{X: gtx.Constraints.Max.X, Y: gtx.Dp(unit.Dp(1))}
+	defer clip.Rect{Max: size}.Push(gtx.Ops).Pop()
+	paint.Fill(gtx.Ops, clrSeparator)
+	return layout.Dimensions{Size: size}
+}
+
+// approxControlsTop is the approximate dp offset from the window top to the
+// bottom of the controls bar (status ~42 + divider 1 + controls 64).
+const approxControlsTop = 107
 
 func (p *Player) draw(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	for len(p.stationBtns) < len(p.filteredList) {
 		p.stationBtns = append(p.stationBtns, widget.Clickable{})
 	}
 
-	paint.Fill(gtx.Ops, th.Palette.Bg)
+	// Apply theme palette
+	th.Palette.Bg = clrBg
+	th.Palette.Fg = clrLabel
+	th.Palette.ContrastBg = clrAccent
+	th.Palette.ContrastFg = clrWhite
 
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		// Status
+	paint.Fill(gtx.Ops, clrBg)
+
+	// Draw main UI.
+	dims := layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Body2(th, p.currentStatus())
-				lbl.Alignment = text.Middle
-				lbl.Font.Style = font.Italic
-				return lbl.Layout(gtx)
-			})
+			d := layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(p.drawStatus(th)),
+				layout.Rigid(thinDivider),
+				layout.Rigid(p.drawControls(th)),
+				layout.Rigid(p.drawSearch(th)),
+				layout.Rigid(thinDivider),
+			)
+			scrollArea := clip.Rect{Max: d.Size}.Push(gtx.Ops)
+			pass := pointer.PassOp{}.Push(gtx.Ops)
+			p.volScroll.Add(gtx.Ops)
+			pass.Pop()
+			scrollArea.Pop()
+			return d
 		}),
-		layout.Rigid(divider),
-		// Controls
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		layout.Flexed(1, p.drawStationList(th)),
+	)
+
+	// Floating dropdown: drawn after main content so it appears on top.
+	// op.Offset positions it without affecting the main layout dimensions.
+	if p.showInstallMenu {
+		cardMaxW := gtx.Dp(unit.Dp(260))
+		dropGtx := gtx
+		dropGtx.Constraints = layout.Constraints{
+			Max: image.Point{X: cardMaxW, Y: gtx.Dp(unit.Dp(200))},
+		}
+		cardDims := p.drawInstallDropdown(th)(dropGtx)
+		x := gtx.Constraints.Max.X - cardDims.Size.X - gtx.Dp(unit.Dp(8))
+		y := gtx.Dp(unit.Dp(approxControlsTop))
+		defer op.Offset(image.Point{X: x, Y: y}).Push(gtx.Ops).Pop()
+		p.drawInstallDropdown(th)(dropGtx)
+	}
+
+	return dims
+}
+
+func (p *Player) drawStatus(th *material.Theme) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		isPlaying := p.playingIdx >= 0
+		status := p.currentStatus()
+
+		return layout.Inset{
+			Top: unit.Dp(12), Bottom: unit.Dp(10),
+			Left: unit.Dp(16), Right: unit.Dp(16),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			if isPlaying {
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						muteLabel := "♪"
-						if p.isMuted {
-							muteLabel = "✕"
-						}
-						btn := material.Button(th, &p.muteBtn, muteLabel)
-						btn.Background = colorBtnGrey
-						btn.TextSize = unit.Sp(20)
-						return layout.Inset{Right: unit.Dp(4)}.Layout(gtx, btn.Layout)
+						// Pulsing-style accent dot
+						dotSize := gtx.Dp(unit.Dp(8))
+						defer clip.RRect{
+							Rect: image.Rectangle{Max: image.Point{X: dotSize, Y: dotSize}},
+							NW: dotSize / 2, NE: dotSize / 2, SW: dotSize / 2, SE: dotSize / 2,
+						}.Push(gtx.Ops).Pop()
+						paint.Fill(gtx.Ops, clrAccent)
+						return layout.Dimensions{Size: image.Point{X: dotSize, Y: dotSize}}
 					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Inset{Right: unit.Dp(4)}.Layout(gtx,
-							material.Slider(th, &p.volSlider).Layout,
-						)
+						lbl := material.Body2(th, status)
+						lbl.Color = clrLabel
+						lbl.Font.Weight = font.SemiBold
+						return lbl.Layout(gtx)
+					}),
+				)
+			}
+			lbl := material.Body2(th, status)
+			lbl.Color = clrSecondary
+			return lbl.Layout(gtx)
+		})
+	}
+}
+
+func (p *Player) drawControls(th *material.Theme) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{
+			Left: unit.Dp(12), Right: unit.Dp(12),
+			Top: unit.Dp(10), Bottom: unit.Dp(10),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				// Mute toggle
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					icon := "♪"
+					if p.isMuted {
+						icon = "x"
+					}
+					return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return iconBtn(gtx, th, &p.muteBtn, icon, clrBtnBg, clrLabel, 36, unit.Sp(15))
+					})
+				}),
+				// Volume slider
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{Right: unit.Dp(8)}.Layout(gtx,
+						material.Slider(th, &p.volSlider).Layout)
+				}),
+				// Play / Stop – primary action, accent colored.
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					icon := "▶"
+					if p.playingIdx >= 0 {
+						icon = "■"
+					}
+					return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return iconBtn(gtx, th, &p.playBtn, icon, clrAccent, clrWhite, 36, unit.Sp(16))
+					})
+				}),
+				// Shuffle
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return iconBtn(gtx, th, &p.randomBtn, "↻", clrBtnBg, clrLabel, 36, unit.Sp(17))
+					})
+				}),
+				// Open file
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return iconBtn(gtx, th, &p.openBtn, "\u229e", clrBtnBg, clrLabel, 36, unit.Sp(15))
+					})
+				}),
+				// Settings / install cogwheel – active state uses accent bg
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					bg := clrBtnBg
+					fg := clrLabel
+					if p.showInstallMenu {
+						bg = clrAccent
+						fg = clrWhite
+					}
+					return iconBtn(gtx, th, &p.installBtn, "⚙", bg, fg, 36, unit.Sp(16))
+				}),
+			)
+		})
+	}
+}
+
+// drawInstallDropdown renders a compact floating dropdown card.
+// Avoids nested withBackground to prevent any accidental full-height fills.
+func (p *Player) drawInstallDropdown(th *material.Theme) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		gtx.Constraints.Min = image.Point{}
+
+		// Measure content to get the card's natural size.
+		macro := op.Record(gtx.Ops)
+		contentDims := p.installUbuntuBtn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{
+				Left: unit.Dp(14), Right: unit.Dp(18),
+				Top: unit.Dp(10), Bottom: unit.Dp(10),
+			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Body2(th, "⚙  ")
+						lbl.Color = clrAccent
+						return lbl.Layout(gtx)
 					}),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						label := "▶"
-						if p.playingIdx >= 0 {
-							label = "■"
-						}
-						btn := material.Button(th, &p.playBtn, label)
-						btn.TextSize = unit.Sp(20)
-						return layout.Inset{Right: unit.Dp(4)}.Layout(gtx, btn.Layout)
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(th, &p.randomBtn, "↻")
-						btn.Background = colorBtnGrey
-						btn.TextSize = unit.Sp(20)
-						return layout.Inset{Right: unit.Dp(4)}.Layout(gtx, btn.Layout)
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(th, &p.openBtn, "📁")
-						btn.Background = colorBtnGrey
-						btn.TextSize = unit.Sp(20)
-						return layout.Inset{Right: unit.Dp(4)}.Layout(gtx, btn.Layout)
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(th, &p.installBtn, "⚙")
-						btn.Background = colorBtnGrey
-						btn.TextSize = unit.Sp(20)
-						return btn.Layout(gtx)
+						lbl := material.Body1(th, "Install for Ubuntu")
+						lbl.Color = clrAccent
+						lbl.Font.Weight = font.Medium
+						return lbl.Layout(gtx)
 					}),
 				)
 			})
-		}),
-		layout.Rigid(divider),
-		// Search + count
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					return layout.UniformInset(unit.Dp(6)).Layout(gtx,
-						material.Editor(th, &p.searchEdit, "Search...").Layout,
-					)
-				}),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layout.Inset{Right: unit.Dp(8)}.Layout(gtx,
-						material.Caption(th, fmt.Sprintf("%d", len(p.filteredList))).Layout,
-					)
-				}),
-			)
-		}),
-		layout.Rigid(divider),
-		// Station list
-		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return material.List(th, &p.stationList).Layout(gtx, len(p.filteredList),
-				func(gtx layout.Context, i int) layout.Dimensions {
-					if i >= len(p.stationBtns) {
-						return layout.Dimensions{}
-					}
-					track := p.filteredList[i]
-					dims := p.stationBtns[i].Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							lbl := material.Body1(th, track.Name)
-							if p.isPlayingTrack(track) {
-								lbl.Font.Weight = font.Bold
-							}
-							return lbl.Layout(gtx)
-						})
-					})
-					divider(gtx)
-					return dims
-				})
-		}),
-	)
+		})
+		call := macro.Stop()
+
+		r := gtx.Dp(unit.Dp(12))
+		b := 1 // border thickness px
+
+		// Border ring.
+		{
+			s := clip.RRect{Rect: image.Rectangle{Max: contentDims.Size}, NW: r, NE: r, SW: r, SE: r}.Push(gtx.Ops)
+			paint.Fill(gtx.Ops, clrSeparator)
+			s.Pop()
+		}
+		// White surface (1 px inset).
+		{
+			inner := image.Rectangle{
+				Min: image.Point{X: b, Y: b},
+				Max: image.Point{X: contentDims.Size.X - b, Y: contentDims.Size.Y - b},
+			}
+			ri := r - b
+			s := clip.RRect{Rect: inner, NW: ri, NE: ri, SW: ri, SE: ri}.Push(gtx.Ops)
+			paint.Fill(gtx.Ops, clrSurface)
+			s.Pop()
+		}
+		// Replay button content on top.
+		call.Add(gtx.Ops)
+		return contentDims
+	}
 }
 
-func divider(gtx layout.Context) layout.Dimensions {
-	size := image.Point{X: gtx.Constraints.Max.X, Y: gtx.Dp(1)}
-	defer clip.Rect{Max: size}.Push(gtx.Ops).Pop()
-	paint.Fill(gtx.Ops, colorDivider)
-	return layout.Dimensions{Size: size}
+func (p *Player) drawSearch(th *material.Theme) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{
+			Left: unit.Dp(12), Right: unit.Dp(12),
+			Top: unit.Dp(8), Bottom: unit.Dp(8),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return withBackground(gtx, clrSurface, unit.Dp(10), func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{
+							Left: unit.Dp(12), Right: unit.Dp(8),
+							Top: unit.Dp(9), Bottom: unit.Dp(9),
+						}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							edit := material.Editor(th, &p.searchEdit, "Search stations...")
+							edit.Color = clrLabel
+							edit.HintColor = clrSecondary
+							edit.TextSize = unit.Sp(15)
+							return edit.Layout(gtx)
+						})
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if len(p.filteredList) == 0 {
+							return layout.Dimensions{}
+						}
+						return layout.Inset{Right: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Caption(th, fmt.Sprintf("%d", len(p.filteredList)))
+							lbl.Color = clrSecondary
+							return lbl.Layout(gtx)
+						})
+					}),
+				)
+			})
+		})
+	}
+}
+
+func (p *Player) drawStationList(th *material.Theme) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		return material.List(th, &p.stationList).Layout(gtx, len(p.filteredList),
+			func(gtx layout.Context, i int) layout.Dimensions {
+				if i >= len(p.stationBtns) {
+					return layout.Dimensions{}
+				}
+				track := p.filteredList[i]
+				isPlaying := p.isPlayingTrack(track)
+
+				rowBg := clrSurface
+				if isPlaying {
+					rowBg = clrAccentFg
+				}
+
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return p.stationBtns[i].Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return withBackground(gtx, rowBg, unit.Dp(0), func(gtx layout.Context) layout.Dimensions {
+								return layout.Inset{
+									Left: unit.Dp(16), Right: unit.Dp(16),
+									Top: unit.Dp(12), Bottom: unit.Dp(12),
+								}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+									// Track name only – playing state shown via color + weight.
+								lbl := material.Body1(th, track.Name)
+								lbl.TextSize = unit.Sp(15)
+								if isPlaying {
+									lbl.Color = clrAccent
+									lbl.Font.Weight = font.SemiBold
+								} else {
+									lbl.Color = clrLabel
+								}
+								return lbl.Layout(gtx)
+								})
+							})
+						})
+					}),
+					layout.Rigid(thinDivider),
+				)
+			})
+	}
 }
 
 func (p *Player) currentStatus() string {
