@@ -159,28 +159,28 @@ func withBackground(gtx layout.Context, bg color.NRGBA, radius unit.Dp, w layout
 	return dims
 }
 
-// iconBtn draws a rounded-rectangle icon button with properly centred label.
-func iconBtn(gtx layout.Context, th *material.Theme, btn *widget.Clickable,
-	label string, bg, fg color.NRGBA, size unit.Dp, textSize unit.Sp) layout.Dimensions {
+// vectorIconBtn draws a rounded-rectangle icon button with a vector IconVG icon.
+func vectorIconBtn(gtx layout.Context, btn *widget.Clickable,
+	ico *widget.Icon, bg, fg color.NRGBA, size unit.Dp, iconSize unit.Dp) layout.Dimensions {
 	return btn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		s := gtx.Dp(size)
 		gtx.Constraints = layout.Exact(image.Point{X: s, Y: s})
-		r := gtx.Dp(unit.Dp(9)) // rounded rect, not full circle
+		r := gtx.Dp(unit.Dp(9))
 		defer clip.RRect{
 			Rect: image.Rectangle{Max: image.Point{X: s, Y: s}},
 			NW: r, NE: r, SW: r, SE: r,
 		}.Push(gtx.Ops).Pop()
 		paint.Fill(gtx.Ops, bg)
-		// Centre label both horizontally and vertically.
 		return layout.Stack{Alignment: layout.Center}.Layout(gtx,
 			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 				return layout.Dimensions{Size: gtx.Constraints.Max}
 			}),
 			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-				lbl := material.Body1(th, label)
-				lbl.Color = fg
-				lbl.TextSize = textSize
-				return lbl.Layout(gtx)
+				isz := gtx.Dp(iconSize)
+				gtx.Constraints.Min = image.Point{X: isz, Y: isz}
+				gtx.Constraints.Max = gtx.Constraints.Min
+				ico.Layout(gtx, fg)
+				return layout.Dimensions{Size: gtx.Constraints.Min}
 			}),
 		)
 	})
@@ -271,7 +271,9 @@ func (p *Player) drawStatus(th *material.Theme) layout.Widget {
 						lbl := material.Body2(th, status)
 						lbl.Color = clrLabel
 						lbl.Font.Weight = font.SemiBold
-						return lbl.Layout(gtx)
+						singleLine := gtx
+						singleLine.Constraints.Max.Y = gtx.Sp(unit.Sp(20))
+						return lbl.Layout(singleLine)
 					}),
 				)
 			}
@@ -291,12 +293,12 @@ func (p *Player) drawControls(th *material.Theme) layout.Widget {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				// Mute toggle
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					icon := "♪"
+					ico := p.icoVolumeUp
 					if p.isMuted {
-						icon = "x"
+						ico = p.icoVolumeOff
 					}
 					return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return iconBtn(gtx, th, &p.muteBtn, icon, clrBtnBg, clrLabel, 36, unit.Sp(15))
+						return vectorIconBtn(gtx, &p.muteBtn, ico, clrBtnBg, clrLabel, 36, 20)
 					})
 				}),
 				// Volume slider
@@ -306,24 +308,24 @@ func (p *Player) drawControls(th *material.Theme) layout.Widget {
 				}),
 				// Play / Stop
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					icon := "▶"
+					ico := p.icoPlay
 					if p.playingIdx >= 0 {
-						icon = "■"
+						ico = p.icoStop
 					}
 					return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return iconBtn(gtx, th, &p.playBtn, icon, clrAccent, clrWhite, 36, unit.Sp(16))
+						return vectorIconBtn(gtx, &p.playBtn, ico, clrAccent, clrWhite, 36, 20)
 					})
 				}),
 				// Shuffle
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return iconBtn(gtx, th, &p.randomBtn, "↻", clrBtnBg, clrLabel, 36, unit.Sp(17))
+						return vectorIconBtn(gtx, &p.randomBtn, p.icoShuffle, clrBtnBg, clrLabel, 36, 20)
 					})
 				}),
 				// Open file
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return iconBtn(gtx, th, &p.openBtn, "\u229e", clrBtnBg, clrLabel, 36, unit.Sp(15))
+						return vectorIconBtn(gtx, &p.openBtn, p.icoFolder, clrBtnBg, clrLabel, 36, 20)
 					})
 				}),
 				// Settings / install cogwheel
@@ -334,7 +336,7 @@ func (p *Player) drawControls(th *material.Theme) layout.Widget {
 						bg = clrAccent
 						fg = clrWhite
 					}
-					return iconBtn(gtx, th, &p.installBtn, "⚙", bg, fg, 36, unit.Sp(16))
+					return vectorIconBtn(gtx, &p.installBtn, p.icoSettings, bg, fg, 36, 20)
 				}),
 			)
 		})
@@ -352,12 +354,15 @@ func (p *Player) drawInstallDropdown(th *material.Theme) layout.Widget {
 				Left: unit.Dp(14), Right: unit.Dp(18),
 				Top: unit.Dp(10), Bottom: unit.Dp(10),
 			}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{}.Layout(gtx,
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Body2(th, "⚙  ")
-						lbl.Color = clrAccent
-						return lbl.Layout(gtx)
+						isz := image.Point{X: gtx.Dp(unit.Dp(18)), Y: gtx.Dp(unit.Dp(18))}
+						gtx.Constraints.Min = isz
+						gtx.Constraints.Max = isz
+						p.icoSettings.Layout(gtx, clrAccent)
+						return layout.Dimensions{Size: isz}
 					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						lbl := material.Body1(th, "Install for Ubuntu")
 						lbl.Color = clrAccent
@@ -462,7 +467,9 @@ func (p *Player) drawStationList(th *material.Theme) layout.Widget {
 									} else {
 										lbl.Color = clrLabel
 									}
-									return lbl.Layout(gtx)
+									singleLine := gtx
+									singleLine.Constraints.Max.Y = gtx.Sp(unit.Sp(22))
+									return lbl.Layout(singleLine)
 								})
 							})
 						})

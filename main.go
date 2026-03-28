@@ -18,6 +18,7 @@ import (
 	"gioui.org/layout"
 	"gioui.org/unit"
 	"gioui.org/widget"
+	"golang.org/x/exp/shiny/materialdesign/icons"
 )
 
 //go:embed icon.png
@@ -75,6 +76,15 @@ type Player struct {
 	stationBtns      []widget.Clickable
 	volScroll        gesture.Scroll
 
+	// Vector icons loaded from Material Design icon set.
+	icoPlay     *widget.Icon
+	icoStop     *widget.Icon
+	icoVolumeUp *widget.Icon
+	icoVolumeOff *widget.Icon
+	icoShuffle  *widget.Icon
+	icoFolder   *widget.Icon
+	icoSettings *widget.Icon
+
 	window *app.Window
 }
 
@@ -95,6 +105,13 @@ func main() {
 		settings:    settings,
 		pendingFile: make(chan string, 1),
 	}
+	p.icoPlay, _ = widget.NewIcon(icons.AVPlayArrow)
+	p.icoStop, _ = widget.NewIcon(icons.AVStop)
+	p.icoVolumeUp, _ = widget.NewIcon(icons.AVVolumeUp)
+	p.icoVolumeOff, _ = widget.NewIcon(icons.AVVolumeOff)
+	p.icoShuffle, _ = widget.NewIcon(icons.AVShuffle)
+	p.icoFolder, _ = widget.NewIcon(icons.FileFolderOpen)
+	p.icoSettings, _ = widget.NewIcon(icons.ActionSettings)
 	p.volSlider.Value = float32(settings.Volume) / 100.0
 	p.stationList.List.Axis = layout.Vertical
 	p.searchEdit.SingleLine = true
