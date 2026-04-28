@@ -317,7 +317,7 @@ func (p *Player) updateVolume(vol int) {
 	if !p.isMuted {
 		p.setVolume(vol)
 	}
-	p.saveSettingsSoon()
+	p.settingsDirty = true
 	p.refreshUI()
 }
 

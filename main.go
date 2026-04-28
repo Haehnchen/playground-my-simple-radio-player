@@ -45,7 +45,7 @@ type Player struct {
 	streamTitle   string
 	streamVersion uint
 	infoPoll      glib.SourceHandle
-	settingsSave  glib.SourceHandle
+	settingsDirty bool
 
 	app         *gtk.Application
 	window      *gtk.ApplicationWindow

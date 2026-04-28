@@ -81,10 +81,6 @@ static void radio_on_source_setup(GstElement *bin, GstElement *source, gpointer 
 	radio_set_bool_if_property(object, "iradio-mode", TRUE);
 	radio_set_bool_if_property(object, "keep-alive", TRUE);
 	radio_set_uint_if_property(object, "blocksize", 32768);
-	radio_set_uint_if_property(object, "timeout", 20);
-	radio_set_int_if_property(object, "retries", 8);
-	radio_set_double_if_property(object, "retry-backoff-factor", 0.35);
-	radio_set_double_if_property(object, "retry-backoff-max", 8.0);
 	radio_set_string_if_property(object, "user-agent", "Radio Player/1.0 GStreamer");
 }
 
@@ -150,16 +146,12 @@ static GstElement* radio_new_pipeline(const char *uri) {
 	}
 
 	g_object_set(G_OBJECT(source), "uri", uri, NULL);
-	radio_set_bool_if_property(G_OBJECT(source), "use-buffering", TRUE);
-	radio_set_int_if_property(G_OBJECT(source), "buffer-size", 2 * 1024 * 1024);
-	radio_set_int64_if_property(G_OBJECT(source), "buffer-duration", 10 * GST_SECOND);
-	radio_set_uint64_if_property(G_OBJECT(source), "ring-buffer-max-size", 8 * 1024 * 1024);
 
 	g_object_set(G_OBJECT(queue),
 		"max-size-buffers", 0,
 		"max-size-bytes", 0,
-		"max-size-time", (guint64)(3 * GST_SECOND),
-		"min-threshold-time", (guint64)(250 * GST_MSECOND),
+		"max-size-time", (guint64)(250 * GST_MSECOND),
+		"min-threshold-time", (guint64)0,
 		"silent", TRUE,
 		NULL);
 
@@ -612,17 +604,6 @@ func saveSettings(s Settings) {
 	os.WriteFile(path, data, 0644)
 }
 
-func (p *Player) saveSettingsSoon() {
-	if p.settingsSave != 0 {
-		glib.SourceRemove(p.settingsSave)
-	}
-	p.settingsSave = glib.TimeoutAdd(250, func() bool {
-		p.settingsSave = 0
-		saveSettings(p.settings)
-		return false
-	})
-}
-
 // --- Playlist parsing ---
 
 func (p *Player) loadPlaylist(filename string) bool {
@@ -773,10 +754,9 @@ StartupWMClass=%s
 }
 
 func (p *Player) cleanup() {
-	if p.settingsSave != 0 {
-		glib.SourceRemove(p.settingsSave)
-		p.settingsSave = 0
+	if p.settingsDirty {
 		saveSettings(p.settings)
+		p.settingsDirty = false
 	}
 	p.stopStreamInfoPolling()
 	if p.gstPlayer != nil {
