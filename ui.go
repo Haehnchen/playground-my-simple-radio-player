@@ -172,7 +172,7 @@ func (p *Player) scrollVolume(dy float64) bool {
 
 func (p *Player) updateVolume(vol int) {
 	oldVolume := p.settings.Volume
-	shouldUnmute := p.isMuted && vol > oldVolume
+	shouldUnmute := p.isMuted && vol != oldVolume
 	if vol < 0 {
 		vol = 0
 	} else if vol > 100 {
