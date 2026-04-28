@@ -20,6 +20,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -47,32 +48,37 @@ jobs:
             pkg-config \
             zip
 
-      - name: Build binary
-        run: make build
-
-      - name: Package binary
-        id: package
+      - name: Set build metadata
+        id: metadata
         shell: bash
         run: |
           short_sha="${GITHUB_SHA::7}"
-          archive="radioplayer-linux-amd64-${short_sha}.zip"
+          {
+            echo "short_sha=$short_sha"
+            echo "archive=radioplayer-linux-amd64-${short_sha}.zip"
+            echo "tag=nightly-$short_sha"
+            echo "version=nightly-$short_sha"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        run: make BUILD_VERSION="${{ steps.metadata.outputs.version }}" BUILD_DATE="${{ steps.metadata.outputs.date }}" build
+
+      - name: Package binary
+        shell: bash
+        run: |
+          archive="${{ steps.metadata.outputs.archive }}"
 
           strip radioplayer
           zip -j "$archive" radioplayer
-
-          {
-            echo "short_sha=$short_sha"
-            echo "archive=$archive"
-            echo "tag=nightly-$short_sha"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Create nightly release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ steps.package.outputs.tag }}"
-          archive="${{ steps.package.outputs.archive }}"
-          short_sha="${{ steps.package.outputs.short_sha }}"
+          tag="${{ steps.metadata.outputs.tag }}"
+          archive="${{ steps.metadata.outputs.archive }}"
+          short_sha="${{ steps.metadata.outputs.short_sha }}"
 
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$archive" --clobber

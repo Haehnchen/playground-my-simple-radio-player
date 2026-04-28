@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/diamondburned/gotk4/pkg/gdk/v4"
+	"github.com/diamondburned/gotk4/pkg/gdkpixbuf/v2"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	glib "github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
@@ -35,10 +37,13 @@ func (p *Player) activate(initialFile string) {
 }
 
 func (p *Player) buildUI() {
+	installAppCSS()
+
 	p.window = gtk.NewApplicationWindow(p.app)
 	p.window.SetTitle(appName)
 	p.window.SetIconName(appID)
 	p.window.SetDefaultSize(420, 480)
+	p.window.SetTitlebar(p.titlebar())
 
 	root := gtk.NewBox(gtk.OrientationVertical, 6)
 	setMargin(root, 8)
@@ -130,6 +135,114 @@ func (p *Player) buildUI() {
 	root.Append(scroller)
 
 	p.refreshUI()
+}
+
+func (p *Player) titlebar() *gtk.HeaderBar {
+	header := gtk.NewHeaderBar()
+	header.SetShowTitleButtons(true)
+
+	infoIcon := gtk.NewImageFromIconName("dialog-information-symbolic")
+	infoIcon.SetPixelSize(16)
+	infoBtn := gtk.NewButton()
+	infoBtn.SetChild(infoIcon)
+	infoBtn.SetHasFrame(false)
+	infoBtn.SetFocusOnClick(false)
+	infoBtn.SetTooltipText("Info")
+	infoBtn.AddCSSClass("titlebar-info-button")
+	infoBtn.ConnectClicked(func() { p.showAboutDialog() })
+	header.PackStart(infoBtn)
+
+	return header
+}
+
+func (p *Player) showAboutDialog() {
+	dialog := gtk.NewDialog()
+	dialog.SetTransientFor(&p.window.Window)
+	dialog.SetModal(true)
+	dialog.SetTitle("Info")
+	dialog.SetDefaultSize(336, -1)
+	dialog.SetResizable(false)
+
+	content := dialog.ContentArea()
+	content.SetSpacing(12)
+	setMargins(content, 16, 18, 12, 18)
+
+	body := gtk.NewBox(gtk.OrientationHorizontal, 14)
+	logo := gtk.NewImageFromPaintable(appLogo(64, 64))
+	logo.SetPixelSize(64)
+	logo.SetVAlign(gtk.AlignStart)
+	body.Append(logo)
+
+	text := gtk.NewLabel(buildInfoText())
+	text.SetXAlign(0)
+	text.SetSelectable(false)
+	body.Append(text)
+	content.Append(body)
+
+	closeBtn := dialog.AddButton("Close", int(gtk.ResponseClose))
+	if widget, ok := closeBtn.(interface {
+		SetMarginEnd(int)
+		SetMarginBottom(int)
+	}); ok {
+		widget.SetMarginEnd(12)
+		widget.SetMarginBottom(10)
+	}
+	dialog.ConnectResponse(func(_ int) {
+		dialog.Close()
+	})
+	dialog.Present()
+	glib.IdleAdd(func() {
+		dialog.SetFocus(nil)
+		dialog.SetFocusVisible(false)
+	})
+}
+
+func appLogo(canvasSize, iconSize int) gdk.Paintabler {
+	iconData, err := iconFS.ReadFile("icon.png")
+	if err != nil {
+		return nil
+	}
+	stream := gio.NewMemoryInputStreamFromBytes(glib.NewBytes(iconData))
+	icon, err := gdkpixbuf.NewPixbufFromStreamAtScale(context.Background(), stream, iconSize, iconSize, true)
+	if err != nil {
+		return nil
+	}
+	canvas := gdkpixbuf.NewPixbuf(gdkpixbuf.ColorspaceRGB, true, 8, canvasSize, canvasSize)
+	canvas.Fill(0x00000000)
+	offset := (canvasSize - iconSize) / 2
+	icon.CopyArea(0, 0, iconSize, iconSize, canvas, offset, offset)
+	return gdk.NewTextureForPixbuf(canvas)
+}
+
+var appCSSLoaded bool
+
+func installAppCSS() {
+	if appCSSLoaded {
+		return
+	}
+	display := gdk.DisplayGetDefault()
+	if display == nil {
+		return
+	}
+	provider := gtk.NewCSSProvider()
+	provider.LoadFromString(`
+button.titlebar-info-button {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 2px;
+  margin-left: 8px;
+  margin-right: 2px;
+  border-radius: 999px;
+}
+button.titlebar-info-button:hover {
+  background-color: rgba(127, 127, 127, 0.14);
+}
+button.titlebar-info-button:active {
+  background-color: rgba(127, 127, 127, 0.22);
+}
+`)
+	gtk.StyleContextAddProviderForDisplay(display, provider, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+	appCSSLoaded = true
 }
 
 type marginSetter interface {
