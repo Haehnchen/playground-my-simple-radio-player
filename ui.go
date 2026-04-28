@@ -227,6 +227,7 @@ func (p *Player) refreshUI() {
 		return
 	}
 	p.statusLabel.SetMarkup(p.currentStatusMarkup())
+	p.statusLabel.SetTooltipText(p.currentStatusTooltip())
 	if p.playingIdx >= 0 {
 		p.playBtn.SetIconName("media-playback-stop-symbolic")
 	} else {

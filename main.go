@@ -41,6 +41,7 @@ type Player struct {
 	savedVolume  int
 	statusMsg    string
 	streamInfo   string
+	streamTitle  string
 	infoPoll     glib.SourceHandle
 
 	app         *gtk.Application

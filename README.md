@@ -5,6 +5,7 @@ A simple radio player with a native GTK 4 UI, built in Go. Playback uses GStream
 ## Features
 
 - Play internet radio streams from M3U8 playlists
+- Show the current stream title when the station provides metadata
 - Search/filter stations
 - Volume control
 - Mute, shuffle, and play/stop controls

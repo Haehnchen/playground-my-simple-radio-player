@@ -7,6 +7,7 @@ package main
 
 typedef struct {
 	gchar *codec;
+	gchar *title;
 	guint bitrate;
 	guint nominal_bitrate;
 	gint rate;
@@ -17,6 +18,7 @@ static void radio_stream_info_free(gpointer data) {
 	RadioStreamInfo *info = data;
 	if (info != NULL) {
 		g_free(info->codec);
+		g_free(info->title);
 		g_free(info);
 	}
 }
@@ -108,10 +110,15 @@ static void radio_update_info_from_bus(GstElement *player, RadioStreamInfo *info
 		gst_message_parse_tag(message, &tags);
 		if (tags != NULL) {
 			gchar *codec = NULL;
+			gchar *title = NULL;
 			guint bitrate = 0;
 			if (gst_tag_list_get_string(tags, GST_TAG_AUDIO_CODEC, &codec)) {
 				g_free(info->codec);
 				info->codec = codec;
+			}
+			if (gst_tag_list_get_string(tags, GST_TAG_TITLE, &title)) {
+				g_free(info->title);
+				info->title = title;
 			}
 			if (gst_tag_list_get_uint(tags, GST_TAG_BITRATE, &bitrate)) {
 				info->bitrate = bitrate;
@@ -200,6 +207,18 @@ static char* radio_stream_info(GstElement *player) {
 	return g_string_free(out, FALSE);
 }
 
+static char* radio_stream_title(GstElement *player) {
+	RadioStreamInfo *info = g_object_get_data(G_OBJECT(player), "radio-info");
+	if (info == NULL) {
+		return NULL;
+	}
+	radio_update_info_from_bus(player, info);
+	if (info->title != NULL && info->title[0] != '\0') {
+		return g_strdup(info->title);
+	}
+	return NULL;
+}
+
 static void radio_free_string(char *value) {
 	g_free(value);
 }
@@ -266,6 +285,7 @@ func (p *Player) playTrack(id int) {
 	}
 	p.statusMsg = ""
 	p.streamInfo = ""
+	p.streamTitle = ""
 	p.settings.LastTrackURL = track.URL
 	saveSettings(p.settings)
 	p.refreshUI()
@@ -279,6 +299,7 @@ func (p *Player) stopPlayback() {
 	}
 	p.playingIdx = -1
 	p.streamInfo = ""
+	p.streamTitle = ""
 	p.settings.LastTrackURL = ""
 	saveSettings(p.settings)
 	p.refreshUI()
@@ -335,10 +356,24 @@ func (p *Player) currentStatusMarkup() string {
 		return glib.MarkupEscapeText(p.currentStatus())
 	}
 	markup := glib.MarkupEscapeText(p.playlist[p.playingIdx].Name)
-	if p.streamInfo != "" {
-		markup += ` <span size="smaller" foreground="#6f747a">(` + glib.MarkupEscapeText(p.streamInfo) + `)</span>`
+	if p.streamTitle != "" {
+		markup += ` <span size="smaller" foreground="#6f747a"> ` + glib.MarkupEscapeText(p.streamTitle) + `</span>`
 	}
 	return markup
+}
+
+func (p *Player) currentStatusTooltip() string {
+	if p.playingIdx < 0 || p.streamInfo == "" {
+		return ""
+	}
+	return p.streamInfo
+}
+
+func (p *Player) streamTitleMatchesStation(title string) bool {
+	if p.playingIdx < 0 || p.playingIdx >= len(p.playlist) {
+		return false
+	}
+	return normalizeMetadataText(title) == normalizeMetadataText(p.playlist[p.playingIdx].Name)
 }
 
 func (p *Player) autoPlayLastTrack() {
@@ -562,24 +597,22 @@ func gboolean(value bool) C.gboolean {
 
 func (p *Player) startStreamInfoPolling() {
 	p.stopStreamInfoPolling()
-	attempts := 0
 	p.infoPoll = glib.TimeoutAdd(500, func() bool {
 		if p.playingIdx < 0 || p.gstPlayer == nil {
 			p.infoPoll = 0
 			return false
 		}
-		attempts++
+		changed := false
 		if info := p.readStreamInfo(); info != "" && info != p.streamInfo {
 			p.streamInfo = info
+			changed = true
+		}
+		if title := p.readStreamTitle(); title != p.streamTitle {
+			p.streamTitle = title
+			changed = true
+		}
+		if changed {
 			p.refreshUI()
-		}
-		if attempts >= 20 && p.streamInfo != "" {
-			p.infoPoll = 0
-			return false
-		}
-		if attempts >= 40 {
-			p.infoPoll = 0
-			return false
 		}
 		return true
 	})
@@ -604,6 +637,22 @@ func (p *Player) readStreamInfo() string {
 	return shortenStreamInfo(C.GoString(info))
 }
 
+func (p *Player) readStreamTitle() string {
+	if p.gstPlayer == nil {
+		return ""
+	}
+	title := C.radio_stream_title((*C.GstElement)(p.gstPlayer))
+	if title == nil {
+		return ""
+	}
+	defer C.radio_free_string(title)
+	cleaned := cleanStreamTitle(C.GoString(title))
+	if p.streamTitleMatchesStation(cleaned) {
+		return ""
+	}
+	return cleaned
+}
+
 func shortenStreamInfo(info string) string {
 	parts := strings.Split(info, ", ")
 	if len(parts) == 0 {
@@ -611,6 +660,19 @@ func shortenStreamInfo(info string) string {
 	}
 	parts[0] = shortCodecName(parts[0])
 	return strings.Join(parts, ", ")
+}
+
+func cleanStreamTitle(title string) string {
+	title = strings.TrimSpace(title)
+	title = strings.ReplaceAll(title, "|", " - ")
+	return strings.Join(strings.Fields(title), " ")
+}
+
+func normalizeMetadataText(value string) string {
+	value = cleanStreamTitle(value)
+	value = strings.ToLower(value)
+	replacer := strings.NewReplacer("-", "", "_", "", ".", "", " ", "")
+	return replacer.Replace(value)
 }
 
 func shortCodecName(codec string) string {
