@@ -24,8 +24,8 @@ static void radio_stream_info_free(gpointer data) {
 }
 
 static void radio_on_pad_added(GstElement *src, GstPad *pad, gpointer data) {
-	GstElement *convert = GST_ELEMENT(data);
-	GstPad *sink = gst_element_get_static_pad(convert, "sink");
+	GstElement *queue = GST_ELEMENT(data);
+	GstPad *sink = gst_element_get_static_pad(queue, "sink");
 	if (sink == NULL || gst_pad_is_linked(sink)) {
 		if (sink != NULL) {
 			gst_object_unref(sink);
@@ -51,12 +51,13 @@ static void radio_on_pad_added(GstElement *src, GstPad *pad, gpointer data) {
 static GstElement* radio_new_pipeline(const char *uri) {
 	GstElement *pipeline = gst_pipeline_new("radio-player");
 	GstElement *source = gst_element_factory_make("uridecodebin", "source");
+	GstElement *queue = gst_element_factory_make("queue", "audio-buffer");
 	GstElement *convert = gst_element_factory_make("audioconvert", "convert");
 	GstElement *resample = gst_element_factory_make("audioresample", "resample");
 	GstElement *volume = gst_element_factory_make("volume", "radio-volume");
 	GstElement *sink = gst_element_factory_make("autoaudiosink", "sink");
 
-	if (pipeline == NULL || source == NULL || convert == NULL || resample == NULL || volume == NULL || sink == NULL) {
+	if (pipeline == NULL || source == NULL || queue == NULL || convert == NULL || resample == NULL || volume == NULL || sink == NULL) {
 		if (pipeline != NULL) {
 			gst_object_unref(pipeline);
 		}
@@ -64,13 +65,21 @@ static GstElement* radio_new_pipeline(const char *uri) {
 	}
 
 	g_object_set(G_OBJECT(source), "uri", uri, NULL);
-	gst_bin_add_many(GST_BIN(pipeline), source, convert, resample, volume, sink, NULL);
-	if (!gst_element_link_many(convert, resample, volume, sink, NULL)) {
+	g_object_set(G_OBJECT(queue),
+		"max-size-buffers", 0,
+		"max-size-bytes", 0,
+		"max-size-time", (guint64)(3 * GST_SECOND),
+		"min-threshold-time", (guint64)(250 * GST_MSECOND),
+		"silent", TRUE,
+		NULL);
+
+	gst_bin_add_many(GST_BIN(pipeline), source, queue, convert, resample, volume, sink, NULL);
+	if (!gst_element_link_many(queue, convert, resample, volume, sink, NULL)) {
 		gst_object_unref(pipeline);
 		return NULL;
 	}
 	g_object_set_data_full(G_OBJECT(pipeline), "radio-info", g_new0(RadioStreamInfo, 1), radio_stream_info_free);
-	g_signal_connect(source, "pad-added", G_CALLBACK(radio_on_pad_added), convert);
+	g_signal_connect(source, "pad-added", G_CALLBACK(radio_on_pad_added), queue);
 	return pipeline;
 }
 
@@ -406,8 +415,12 @@ func (p *Player) filterPlaylist(query string) {
 // --- Settings ---
 
 func getSettingsPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "radioplayer", "settings.json")
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		home, _ := os.UserHomeDir()
+		configDir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(configDir, "radioplayer", "settings.json")
 }
 
 func loadSettings() Settings {
