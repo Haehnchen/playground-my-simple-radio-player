@@ -17,6 +17,8 @@ typedef struct {
 
 static void radio_start_bus_watch(GstElement *player);
 static void radio_stop_bus_watch(GstElement *player);
+static void radio_update_player_info_from_caps(GstElement *player, GstCaps *caps);
+static GstPadProbeReturn radio_on_audio_pad_event(GstPad *pad, GstPadProbeInfo *probe_info, gpointer data);
 
 static void radio_stream_info_free(gpointer data) {
 	RadioStreamInfo *info = data;
@@ -89,26 +91,46 @@ static void radio_on_source_setup(GstElement *bin, GstElement *source, gpointer 
 static void radio_on_pad_added(GstElement *src, GstPad *pad, gpointer data) {
 	GstElement *queue = GST_ELEMENT(data);
 	GstPad *sink = gst_element_get_static_pad(queue, "sink");
+	GstElement *player = GST_ELEMENT(gst_element_get_parent(src));
 	if (sink == NULL || gst_pad_is_linked(sink)) {
 		if (sink != NULL) {
 			gst_object_unref(sink);
 		}
+		if (player != NULL) {
+			gst_object_unref(player);
+		}
 		return;
 	}
 
+	gboolean is_audio = FALSE;
 	GstCaps *caps = gst_pad_get_current_caps(pad);
 	if (caps == NULL) {
 		caps = gst_pad_query_caps(pad, NULL);
 	}
-	if (caps != NULL) {
+	if (caps != NULL && !gst_caps_is_empty(caps) && !gst_caps_is_any(caps)) {
 		GstStructure *structure = gst_caps_get_structure(caps, 0);
 		const char *name = gst_structure_get_name(structure);
 		if (name != NULL && g_str_has_prefix(name, "audio/")) {
-			gst_pad_link(pad, sink);
+			is_audio = TRUE;
 		}
+	}
+	if (caps != NULL) {
 		gst_caps_unref(caps);
 	}
+	if (is_audio) {
+		gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, radio_on_audio_pad_event, player, NULL);
+		if (gst_pad_link(pad, sink) == GST_PAD_LINK_OK) {
+			caps = gst_pad_get_current_caps(pad);
+			if (caps != NULL) {
+				radio_update_player_info_from_caps(player, caps);
+				gst_caps_unref(caps);
+			}
+		}
+	}
 	gst_object_unref(sink);
+	if (player != NULL) {
+		gst_object_unref(player);
+	}
 }
 
 static GstElement* radio_new_pipeline(const char *uri) {
@@ -214,6 +236,54 @@ static gboolean radio_update_info_from_tags(RadioStreamInfo *info, GstTagList *t
 		changed = TRUE;
 	}
 	return changed;
+}
+
+static gboolean radio_update_info_from_caps(RadioStreamInfo *info, GstCaps *caps) {
+	if (info == NULL || caps == NULL || gst_caps_is_empty(caps) || gst_caps_is_any(caps)) {
+		return FALSE;
+	}
+
+	GstStructure *structure = gst_caps_get_structure(caps, 0);
+	if (structure == NULL) {
+		return FALSE;
+	}
+
+	gboolean changed = FALSE;
+	gint rate = 0;
+	gint channels = 0;
+	if (gst_structure_get_int(structure, "rate", &rate) && info->rate != rate) {
+		info->rate = rate;
+		changed = TRUE;
+	}
+	if (gst_structure_get_int(structure, "channels", &channels) && info->channels != channels) {
+		info->channels = channels;
+		changed = TRUE;
+	}
+	return changed;
+}
+
+static void radio_update_player_info_from_caps(GstElement *player, GstCaps *caps) {
+	if (player == NULL) {
+		return;
+	}
+	RadioStreamInfo *info = g_object_get_data(G_OBJECT(player), "radio-info");
+	if (radio_update_info_from_caps(info, caps)) {
+		info->version++;
+	}
+}
+
+static GstPadProbeReturn radio_on_audio_pad_event(GstPad *pad, GstPadProbeInfo *probe_info, gpointer data) {
+	if ((GST_PAD_PROBE_INFO_TYPE(probe_info) & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM) == 0) {
+		return GST_PAD_PROBE_OK;
+	}
+
+	GstEvent *event = GST_PAD_PROBE_INFO_EVENT(probe_info);
+	if (event != NULL && GST_EVENT_TYPE(event) == GST_EVENT_CAPS) {
+		GstCaps *caps = NULL;
+		gst_event_parse_caps(event, &caps);
+		radio_update_player_info_from_caps((GstElement*)data, caps);
+	}
+	return GST_PAD_PROBE_OK;
 }
 
 static gboolean radio_on_bus_message(GstBus *bus, GstMessage *message, gpointer data) {
@@ -768,7 +838,7 @@ func (p *Player) readStreamInfo() string {
 		return ""
 	}
 	defer C.radio_free_string(info)
-	return shortenStreamInfo(C.GoString(info))
+	return C.GoString(info)
 }
 
 func (p *Player) readStreamTitle() string {
@@ -787,15 +857,6 @@ func (p *Player) readStreamTitle() string {
 	return cleaned
 }
 
-func shortenStreamInfo(info string) string {
-	parts := strings.Split(info, ", ")
-	if len(parts) == 0 {
-		return info
-	}
-	parts[0] = shortCodecName(parts[0])
-	return strings.Join(parts, ", ")
-}
-
 func cleanStreamTitle(title string) string {
 	title = strings.TrimSpace(title)
 	title = strings.ReplaceAll(title, "|", " - ")
@@ -807,26 +868,4 @@ func normalizeMetadataText(value string) string {
 	value = strings.ToLower(value)
 	replacer := strings.NewReplacer("-", "", "_", "", ".", "", " ", "")
 	return replacer.Replace(value)
-}
-
-func shortCodecName(codec string) string {
-	name := strings.ToLower(codec)
-	switch {
-	case strings.Contains(name, "mpeg-1 layer 3"), strings.Contains(name, "mp3"):
-		return "MP3"
-	case strings.Contains(name, "advanced audio coding"), strings.Contains(name, "aac"):
-		return "AAC"
-	case strings.Contains(name, "opus"):
-		return "Opus"
-	case strings.Contains(name, "vorbis"):
-		return "Vorbis"
-	case strings.Contains(name, "flac"):
-		return "FLAC"
-	case strings.Contains(name, "wavpack"):
-		return "WavPack"
-	case strings.Contains(name, "pcm"):
-		return "PCM"
-	default:
-		return codec
-	}
 }
