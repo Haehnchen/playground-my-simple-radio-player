@@ -414,17 +414,20 @@ func (p *Player) filterPlaylist(query string) {
 
 // --- Settings ---
 
-func getSettingsPath() string {
+func getSettingsPath() (string, error) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		home, _ := os.UserHomeDir()
-		configDir = filepath.Join(home, ".config")
+		return "", err
 	}
-	return filepath.Join(configDir, "radioplayer", "settings.json")
+	return filepath.Join(configDir, "radioplayer", "settings.json"), nil
 }
 
 func loadSettings() Settings {
-	data, err := os.ReadFile(getSettingsPath())
+	path, err := getSettingsPath()
+	if err != nil {
+		return Settings{Volume: 75}
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return Settings{Volume: 75}
 	}
@@ -436,7 +439,10 @@ func loadSettings() Settings {
 }
 
 func saveSettings(s Settings) {
-	path := getSettingsPath()
+	path, err := getSettingsPath()
+	if err != nil {
+		return
+	}
 	os.MkdirAll(filepath.Dir(path), 0755)
 	data, _ := json.MarshalIndent(s, "", "  ")
 	os.WriteFile(path, data, 0644)
