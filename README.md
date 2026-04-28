@@ -20,6 +20,7 @@ A simple radio player with a native GTK 4 UI, built in Go. Playback uses GStream
 ## Requirements
 
 - Go 1.21+
+- Build tools (`gcc`, `make`, `pkg-config`)
 - GTK 4 development files
 - GObject Introspection development files
 - GStreamer development files and playback plugins
@@ -27,7 +28,7 @@ A simple radio player with a native GTK 4 UI, built in Go. Playback uses GStream
 ### Linux (Debian/Ubuntu)
 
 ```bash
-sudo apt install libgtk-4-dev gobject-introspection libgirepository1.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good
+sudo apt install build-essential pkg-config libgtk-4-dev gobject-introspection libgirepository1.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good
 ```
 
 ## Build
