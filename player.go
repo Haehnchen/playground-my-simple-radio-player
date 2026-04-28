@@ -388,12 +388,17 @@ func (p *Player) setVolume(vol int) {
 func (p *Player) toggleMute() {
 	if p.isMuted {
 		p.isMuted = false
-		if p.volumeScale != nil {
-			p.volumeScale.SetValue(float64(p.savedVolume))
+		if p.settings.Volume == 0 {
+			p.updateVolume(p.savedVolume)
+		} else {
+			p.setVolumeScaleValue(p.settings.Volume)
+			p.setVolume(p.settings.Volume)
 		}
 	} else {
 		p.isMuted = true
-		p.savedVolume = p.settings.Volume
+		if p.settings.Volume > 0 {
+			p.savedVolume = p.settings.Volume
+		}
 	}
 	p.setMuted(p.isMuted)
 	p.refreshUI()
@@ -511,6 +516,17 @@ func saveSettings(s Settings) {
 	os.MkdirAll(filepath.Dir(path), 0755)
 	data, _ := json.MarshalIndent(s, "", "  ")
 	os.WriteFile(path, data, 0644)
+}
+
+func (p *Player) saveSettingsSoon() {
+	if p.settingsSave != 0 {
+		glib.SourceRemove(p.settingsSave)
+	}
+	p.settingsSave = glib.TimeoutAdd(250, func() bool {
+		p.settingsSave = 0
+		saveSettings(p.settings)
+		return false
+	})
 }
 
 // --- Playlist parsing ---
@@ -663,6 +679,11 @@ StartupWMClass=%s
 }
 
 func (p *Player) cleanup() {
+	if p.settingsSave != 0 {
+		glib.SourceRemove(p.settingsSave)
+		p.settingsSave = 0
+		saveSettings(p.settings)
+	}
 	p.stopStreamInfoPolling()
 	if p.gstPlayer != nil {
 		player := (*C.GstElement)(p.gstPlayer)

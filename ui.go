@@ -50,12 +50,6 @@ func (p *Player) buildUI() {
 	p.window.SetChild(root)
 
 	top := gtk.NewBox(gtk.OrientationVertical, 6)
-	scroll := gtk.NewEventControllerScroll(gtk.EventControllerScrollVertical)
-	scroll.SetPropagationPhase(gtk.PhaseCapture)
-	scroll.ConnectScroll(func(_ float64, dy float64) bool {
-		return p.scrollVolume(dy)
-	})
-	top.AddController(scroll)
 	root.Append(top)
 
 	p.statusLabel = gtk.NewLabel("")
@@ -70,12 +64,21 @@ func (p *Player) buildUI() {
 	p.volumeScale.SetDrawValue(false)
 	p.volumeScale.SetValue(float64(p.settings.Volume))
 	p.volumeScale.SetHExpand(true)
+	volumeScroll := gtk.NewEventControllerScroll(gtk.EventControllerScrollVertical | gtk.EventControllerScrollDiscrete)
+	volumeScroll.SetPropagationPhase(gtk.PhaseCapture)
+	volumeScroll.ConnectScroll(func(_ float64, dy float64) bool {
+		return p.scrollVolume(dy)
+	})
+	p.volumeScale.AddController(volumeScroll)
 	p.playBtn = iconButton("media-playback-start-symbolic", "Play")
 	shuffleBtn := iconButton("media-playlist-shuffle-symbolic", "Shuffle")
 	openBtn := iconButton("document-open-symbolic", "Open")
 
 	p.muteBtn.ConnectClicked(func() { p.toggleMute() })
 	p.volumeScale.ConnectValueChanged(func() {
+		if p.syncingVolume {
+			return
+		}
 		p.updateVolume(int(p.volumeScale.Value()))
 	})
 	p.playBtn.ConnectClicked(func() {
@@ -226,7 +229,7 @@ func installAppCSS() {
 		return
 	}
 	provider := gtk.NewCSSProvider()
-provider.LoadFromString(`
+	provider.LoadFromString(`
 headerbar.compact-titlebar {
   min-height: 0;
   padding-top: 0;
@@ -295,13 +298,13 @@ func (p *Player) scrollVolume(dy float64) bool {
 }
 
 func (p *Player) updateVolume(vol int) {
-	oldVolume := p.settings.Volume
-	shouldUnmute := p.isMuted && vol != oldVolume
 	if vol < 0 {
 		vol = 0
 	} else if vol > 100 {
 		vol = 100
 	}
+	oldVolume := p.settings.Volume
+	shouldUnmute := p.isMuted && vol != oldVolume
 	if shouldUnmute {
 		p.isMuted = false
 		p.setMuted(false)
@@ -310,12 +313,21 @@ func (p *Player) updateVolume(vol int) {
 		return
 	}
 	p.settings.Volume = vol
-	p.volumeScale.SetValue(float64(vol))
+	p.setVolumeScaleValue(vol)
 	if !p.isMuted {
 		p.setVolume(vol)
 	}
-	saveSettings(p.settings)
+	p.saveSettingsSoon()
 	p.refreshUI()
+}
+
+func (p *Player) setVolumeScaleValue(vol int) {
+	if p.volumeScale == nil || int(p.volumeScale.Value()) == vol {
+		return
+	}
+	p.syncingVolume = true
+	p.volumeScale.SetValue(float64(vol))
+	p.syncingVolume = false
 }
 
 func (p *Player) rebuildStationList() {
@@ -359,8 +371,10 @@ func (p *Player) refreshUI() {
 	}
 	if p.isMuted {
 		p.muteBtn.SetIconName("xsi-audio-volume-muted-symbolic")
+		p.muteBtn.SetTooltipText("Unmute")
 	} else {
 		p.muteBtn.SetIconName("xsi-audio-volume-high-symbolic")
+		p.muteBtn.SetTooltipText("Mute")
 	}
 	if len(p.filteredList) == 0 {
 		p.countLabel.SetText("")

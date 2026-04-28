@@ -33,16 +33,18 @@ type Settings struct {
 type Player struct {
 	gstPlayer unsafe.Pointer
 
-	playlist     []Track
-	filteredList []Track
-	playingIdx   int
-	settings     Settings
-	isMuted      bool
-	savedVolume  int
-	statusMsg    string
-	streamInfo   string
-	streamTitle  string
-	infoPoll     glib.SourceHandle
+	playlist      []Track
+	filteredList  []Track
+	playingIdx    int
+	settings      Settings
+	isMuted       bool
+	savedVolume   int
+	syncingVolume bool
+	statusMsg     string
+	streamInfo    string
+	streamTitle   string
+	infoPoll      glib.SourceHandle
+	settingsSave  glib.SourceHandle
 
 	app         *gtk.Application
 	window      *gtk.ApplicationWindow
