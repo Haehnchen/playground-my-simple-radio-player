@@ -43,6 +43,7 @@ type Player struct {
 	statusMsg     string
 	streamInfo    string
 	streamTitle   string
+	streamVersion uint
 	infoPoll      glib.SourceHandle
 	settingsSave  glib.SourceHandle
 

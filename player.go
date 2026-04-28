@@ -12,7 +12,11 @@ typedef struct {
 	guint nominal_bitrate;
 	gint rate;
 	gint channels;
+	guint version;
 } RadioStreamInfo;
+
+static void radio_start_bus_watch(GstElement *player);
+static void radio_stop_bus_watch(GstElement *player);
 
 static void radio_stream_info_free(gpointer data) {
 	RadioStreamInfo *info = data;
@@ -145,6 +149,7 @@ static GstElement* radio_new_pipeline(const char *uri) {
 	g_object_set_data_full(G_OBJECT(pipeline), "radio-info", g_new0(RadioStreamInfo, 1), radio_stream_info_free);
 	g_signal_connect(source, "source-setup", G_CALLBACK(radio_on_source_setup), NULL);
 	g_signal_connect(source, "pad-added", G_CALLBACK(radio_on_pad_added), queue);
+	radio_start_bus_watch(pipeline);
 	return pipeline;
 }
 
@@ -173,64 +178,76 @@ static void radio_stop(GstElement *player) {
 }
 
 static void radio_unref(GstElement *player) {
+	radio_stop_bus_watch(player);
 	gst_object_unref(player);
 }
 
-static void radio_update_info_from_bus(GstElement *player, RadioStreamInfo *info) {
-	GstBus *bus = gst_element_get_bus(player);
-	GstMessage *message = NULL;
-	while ((message = gst_bus_pop_filtered(bus, GST_MESSAGE_TAG)) != NULL) {
+static gboolean radio_update_info_from_tags(RadioStreamInfo *info, GstTagList *tags) {
+	gboolean changed = FALSE;
+	gchar *codec = NULL;
+	gchar *title = NULL;
+	guint bitrate = 0;
+	if (gst_tag_list_get_string(tags, GST_TAG_AUDIO_CODEC, &codec)) {
+		if (g_strcmp0(info->codec, codec) != 0) {
+			g_free(info->codec);
+			info->codec = codec;
+			changed = TRUE;
+		} else {
+			g_free(codec);
+		}
+	}
+	if (gst_tag_list_get_string(tags, GST_TAG_TITLE, &title)) {
+		if (g_strcmp0(info->title, title) != 0) {
+			g_free(info->title);
+			info->title = title;
+			changed = TRUE;
+		} else {
+			g_free(title);
+		}
+	}
+	if (gst_tag_list_get_uint(tags, GST_TAG_BITRATE, &bitrate) && info->bitrate != bitrate) {
+		info->bitrate = bitrate;
+		changed = TRUE;
+	}
+	if (gst_tag_list_get_uint(tags, GST_TAG_NOMINAL_BITRATE, &bitrate) && info->nominal_bitrate != bitrate) {
+		info->nominal_bitrate = bitrate;
+		changed = TRUE;
+	}
+	return changed;
+}
+
+static gboolean radio_on_bus_message(GstBus *bus, GstMessage *message, gpointer data) {
+	GstElement *player = GST_ELEMENT(data);
+	RadioStreamInfo *info = g_object_get_data(G_OBJECT(player), "radio-info");
+	if (info == NULL) {
+		return G_SOURCE_CONTINUE;
+	}
+	if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_TAG) {
 		GstTagList *tags = NULL;
 		gst_message_parse_tag(message, &tags);
 		if (tags != NULL) {
-			gchar *codec = NULL;
-			gchar *title = NULL;
-			guint bitrate = 0;
-			if (gst_tag_list_get_string(tags, GST_TAG_AUDIO_CODEC, &codec)) {
-				g_free(info->codec);
-				info->codec = codec;
-			}
-			if (gst_tag_list_get_string(tags, GST_TAG_TITLE, &title)) {
-				g_free(info->title);
-				info->title = title;
-			}
-			if (gst_tag_list_get_uint(tags, GST_TAG_BITRATE, &bitrate)) {
-				info->bitrate = bitrate;
-			}
-			if (gst_tag_list_get_uint(tags, GST_TAG_NOMINAL_BITRATE, &bitrate)) {
-				info->nominal_bitrate = bitrate;
+			if (radio_update_info_from_tags(info, tags)) {
+				info->version++;
 			}
 			gst_tag_list_unref(tags);
 		}
-		gst_message_unref(message);
 	}
+	return G_SOURCE_CONTINUE;
+}
+
+static void radio_start_bus_watch(GstElement *player) {
+	GstBus *bus = gst_element_get_bus(player);
+	guint watch_id = gst_bus_add_watch(bus, radio_on_bus_message, player);
+	g_object_set_data(G_OBJECT(player), "radio-bus-watch-id", GUINT_TO_POINTER(watch_id));
 	gst_object_unref(bus);
 }
 
-static void radio_update_info_from_caps(GstElement *player, RadioStreamInfo *info) {
-	GstElement *convert = gst_bin_get_by_name(GST_BIN(player), "convert");
-	if (convert == NULL) {
-		return;
+static void radio_stop_bus_watch(GstElement *player) {
+	guint watch_id = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(player), "radio-bus-watch-id"));
+	if (watch_id != 0) {
+		g_source_remove(watch_id);
+		g_object_set_data(G_OBJECT(player), "radio-bus-watch-id", GUINT_TO_POINTER(0));
 	}
-	GstPad *sink = gst_element_get_static_pad(convert, "sink");
-	if (sink == NULL) {
-		gst_object_unref(convert);
-		return;
-	}
-	GstCaps *caps = gst_pad_get_current_caps(sink);
-	if (caps != NULL) {
-		GstStructure *structure = gst_caps_get_structure(caps, 0);
-		gint value = 0;
-		if (gst_structure_get_int(structure, "rate", &value)) {
-			info->rate = value;
-		}
-		if (gst_structure_get_int(structure, "channels", &value)) {
-			info->channels = value;
-		}
-		gst_caps_unref(caps);
-	}
-	gst_object_unref(sink);
-	gst_object_unref(convert);
 }
 
 static char* radio_stream_info(GstElement *player) {
@@ -238,8 +255,6 @@ static char* radio_stream_info(GstElement *player) {
 	if (info == NULL) {
 		return NULL;
 	}
-	radio_update_info_from_bus(player, info);
-	radio_update_info_from_caps(player, info);
 
 	GString *out = g_string_new(NULL);
 	if (info->codec != NULL && info->codec[0] != '\0') {
@@ -286,11 +301,18 @@ static char* radio_stream_title(GstElement *player) {
 	if (info == NULL) {
 		return NULL;
 	}
-	radio_update_info_from_bus(player, info);
 	if (info->title != NULL && info->title[0] != '\0') {
 		return g_strdup(info->title);
 	}
 	return NULL;
+}
+
+static guint radio_stream_version(GstElement *player) {
+	RadioStreamInfo *info = g_object_get_data(G_OBJECT(player), "radio-info");
+	if (info == NULL) {
+		return 0;
+	}
+	return info->version;
 }
 
 static void radio_free_string(char *value) {
@@ -360,6 +382,7 @@ func (p *Player) playTrack(id int) {
 	p.statusMsg = ""
 	p.streamInfo = ""
 	p.streamTitle = ""
+	p.streamVersion = 0
 	p.settings.LastTrackURL = track.URL
 	saveSettings(p.settings)
 	p.refreshUI()
@@ -374,6 +397,7 @@ func (p *Player) stopPlayback() {
 	p.playingIdx = -1
 	p.streamInfo = ""
 	p.streamTitle = ""
+	p.streamVersion = 0
 	p.settings.LastTrackURL = ""
 	saveSettings(p.settings)
 	p.refreshUI()
@@ -702,11 +726,16 @@ func gboolean(value bool) C.gboolean {
 
 func (p *Player) startStreamInfoPolling() {
 	p.stopStreamInfoPolling()
-	p.infoPoll = glib.TimeoutAdd(500, func() bool {
+	p.infoPoll = glib.TimeoutAdd(1000, func() bool {
 		if p.playingIdx < 0 || p.gstPlayer == nil {
 			p.infoPoll = 0
 			return false
 		}
+		version := uint(C.radio_stream_version((*C.GstElement)(p.gstPlayer)))
+		if version == p.streamVersion {
+			return true
+		}
+		p.streamVersion = version
 		changed := false
 		if info := p.readStreamInfo(); info != "" && info != p.streamInfo {
 			p.streamInfo = info
