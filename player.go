@@ -1,9 +1,87 @@
 package main
 
 /*
-#cgo pkg-config: libvlc
+#cgo pkg-config: gstreamer-1.0
 #include <stdlib.h>
-#include <vlc/vlc.h>
+#include <gst/gst.h>
+
+static void radio_on_pad_added(GstElement *src, GstPad *pad, gpointer data) {
+	GstElement *convert = GST_ELEMENT(data);
+	GstPad *sink = gst_element_get_static_pad(convert, "sink");
+	if (sink == NULL || gst_pad_is_linked(sink)) {
+		if (sink != NULL) {
+			gst_object_unref(sink);
+		}
+		return;
+	}
+
+	GstCaps *caps = gst_pad_get_current_caps(pad);
+	if (caps == NULL) {
+		caps = gst_pad_query_caps(pad, NULL);
+	}
+	if (caps != NULL) {
+		GstStructure *structure = gst_caps_get_structure(caps, 0);
+		const char *name = gst_structure_get_name(structure);
+		if (name != NULL && g_str_has_prefix(name, "audio/")) {
+			gst_pad_link(pad, sink);
+		}
+		gst_caps_unref(caps);
+	}
+	gst_object_unref(sink);
+}
+
+static GstElement* radio_new_pipeline(const char *uri) {
+	GstElement *pipeline = gst_pipeline_new("radio-player");
+	GstElement *source = gst_element_factory_make("uridecodebin", "source");
+	GstElement *convert = gst_element_factory_make("audioconvert", "convert");
+	GstElement *resample = gst_element_factory_make("audioresample", "resample");
+	GstElement *volume = gst_element_factory_make("volume", "radio-volume");
+	GstElement *sink = gst_element_factory_make("autoaudiosink", "sink");
+
+	if (pipeline == NULL || source == NULL || convert == NULL || resample == NULL || volume == NULL || sink == NULL) {
+		if (pipeline != NULL) {
+			gst_object_unref(pipeline);
+		}
+		return NULL;
+	}
+
+	g_object_set(G_OBJECT(source), "uri", uri, NULL);
+	gst_bin_add_many(GST_BIN(pipeline), source, convert, resample, volume, sink, NULL);
+	if (!gst_element_link_many(convert, resample, volume, sink, NULL)) {
+		gst_object_unref(pipeline);
+		return NULL;
+	}
+	g_signal_connect(source, "pad-added", G_CALLBACK(radio_on_pad_added), convert);
+	return pipeline;
+}
+
+static void radio_set_volume(GstElement *player, double volume) {
+	GstElement *volume_element = gst_bin_get_by_name(GST_BIN(player), "radio-volume");
+	if (volume_element != NULL) {
+		g_object_set(G_OBJECT(volume_element), "volume", volume, NULL);
+		gst_object_unref(volume_element);
+	}
+}
+
+static void radio_set_mute(GstElement *player, gboolean muted) {
+	GstElement *volume_element = gst_bin_get_by_name(GST_BIN(player), "radio-volume");
+	if (volume_element != NULL) {
+		g_object_set(G_OBJECT(volume_element), "mute", muted, NULL);
+		gst_object_unref(volume_element);
+	}
+}
+
+static int radio_play(GstElement *player) {
+	return gst_element_set_state(player, GST_STATE_PLAYING) != GST_STATE_CHANGE_FAILURE;
+}
+
+static void radio_stop(GstElement *player) {
+	gst_element_set_state(player, GST_STATE_NULL);
+}
+
+static void radio_unref(GstElement *player) {
+	gst_object_unref(player);
+}
 */
 import "C"
 
@@ -20,6 +98,11 @@ import (
 	"unsafe"
 )
 
+func initAudioBackend() bool {
+	C.gst_init(nil, nil)
+	return true
+}
+
 func (p *Player) playTrack(id int) {
 	if id < 0 || id >= len(p.filteredList) {
 		return
@@ -33,35 +116,30 @@ func (p *Player) playTrack(id int) {
 		}
 	}
 
-	if p.mediaPlayer != nil {
-		C.libvlc_media_player_stop(p.mediaPlayer)
-		C.libvlc_media_player_release(p.mediaPlayer)
-		p.mediaPlayer = nil
-	}
-	if p.media != nil {
-		C.libvlc_media_release(p.media)
-		p.media = nil
+	if p.gstPlayer != nil {
+		player := (*C.GstElement)(p.gstPlayer)
+		C.radio_stop(player)
+		C.radio_unref(player)
+		p.gstPlayer = nil
 	}
 
 	curl := C.CString(track.URL)
 	defer C.free(unsafe.Pointer(curl))
 
-	p.media = C.libvlc_media_new_location(p.instance, curl)
-	if p.media == nil {
-		p.statusMsg = "Error loading " + track.Name
-		p.playingIdx = -1
-		return
-	}
-
-	p.mediaPlayer = C.libvlc_media_player_new_from_media(p.media)
-	if p.mediaPlayer == nil {
+	player := C.radio_new_pipeline(curl)
+	if player == nil {
 		p.statusMsg = "Error creating player"
 		p.playingIdx = -1
 		return
 	}
-
+	p.gstPlayer = unsafe.Pointer(player)
 	p.setVolume(p.settings.Volume)
-	C.libvlc_media_player_play(p.mediaPlayer)
+	C.radio_set_mute(player, gboolean(p.isMuted))
+	if C.radio_play(player) == 0 {
+		p.statusMsg = "Error playing " + track.Name
+		p.playingIdx = -1
+		return
+	}
 	p.statusMsg = ""
 	p.settings.LastTrackURL = track.URL
 	saveSettings(p.settings)
@@ -69,14 +147,8 @@ func (p *Player) playTrack(id int) {
 }
 
 func (p *Player) stopPlayback() {
-	if p.mediaPlayer != nil {
-		C.libvlc_media_player_stop(p.mediaPlayer)
-		C.libvlc_media_player_release(p.mediaPlayer)
-		p.mediaPlayer = nil
-	}
-	if p.media != nil {
-		C.libvlc_media_release(p.media)
-		p.media = nil
+	if p.gstPlayer != nil {
+		C.radio_stop((*C.GstElement)(p.gstPlayer))
 	}
 	p.playingIdx = -1
 	p.settings.LastTrackURL = ""
@@ -85,22 +157,23 @@ func (p *Player) stopPlayback() {
 }
 
 func (p *Player) setVolume(vol int) {
-	if p.mediaPlayer != nil {
-		C.libvlc_audio_set_volume(p.mediaPlayer, C.int(vol))
+	if p.gstPlayer != nil {
+		C.radio_set_volume((*C.GstElement)(p.gstPlayer), C.double(float64(vol)/100))
 	}
 }
 
 func (p *Player) toggleMute() {
 	if p.isMuted {
 		p.isMuted = false
-		p.setVolume(p.savedVolume)
 		if p.volumeScale != nil {
 			p.volumeScale.SetValue(float64(p.savedVolume))
 		}
 	} else {
 		p.isMuted = true
 		p.savedVolume = p.settings.Volume
-		p.setVolume(0)
+	}
+	if p.gstPlayer != nil {
+		C.radio_set_mute((*C.GstElement)(p.gstPlayer), gboolean(p.isMuted))
 	}
 	p.refreshUI()
 }
@@ -328,16 +401,17 @@ StartupWMClass=%s
 }
 
 func (p *Player) cleanup() {
-	if p.mediaPlayer != nil {
-		C.libvlc_media_player_release(p.mediaPlayer)
-		p.mediaPlayer = nil
+	if p.gstPlayer != nil {
+		player := (*C.GstElement)(p.gstPlayer)
+		C.radio_stop(player)
+		C.radio_unref(player)
+		p.gstPlayer = nil
 	}
-	if p.media != nil {
-		C.libvlc_media_release(p.media)
-		p.media = nil
+}
+
+func gboolean(value bool) C.gboolean {
+	if value {
+		return C.gboolean(1)
 	}
-	if p.instance != nil {
-		C.libvlc_release(p.instance)
-		p.instance = nil
-	}
+	return C.gboolean(0)
 }

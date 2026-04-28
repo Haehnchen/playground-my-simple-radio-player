@@ -1,15 +1,7 @@
 package main
 
-/*
-#cgo pkg-config: libvlc
-#include <stdlib.h>
-#include <vlc/vlc.h>
-*/
-import "C"
-
 import (
 	"embed"
-	"fmt"
 	"os"
 	"runtime"
 	"unsafe"
@@ -39,9 +31,7 @@ type Settings struct {
 }
 
 type Player struct {
-	instance    *C.libvlc_instance_t
-	mediaPlayer *C.libvlc_media_player_t
-	media       *C.libvlc_media_t
+	gstPlayer unsafe.Pointer
 
 	playlist     []Track
 	filteredList []Track
@@ -72,18 +62,12 @@ func main() {
 	glib.SetApplicationName(appName)
 	writeUserDesktopIdentity()
 
-	noVideo := C.CString("--no-video")
-	args := []*C.char{noVideo}
-	defer C.free(unsafe.Pointer(noVideo))
-	instance := C.libvlc_new(1, &args[0])
-	if instance == nil {
-		fmt.Fprintln(os.Stderr, "Failed to init VLC. Install: sudo apt install libvlc-dev vlc")
+	if !initAudioBackend() {
 		os.Exit(1)
 	}
 
 	settings := loadSettings()
 	p := &Player{
-		instance:   instance,
 		playingIdx: -1,
 		settings:   settings,
 		savedVolume: func() int {
