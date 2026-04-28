@@ -13,9 +13,9 @@ import (
 	"encoding/xml"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"unsafe"
 )
@@ -60,11 +60,12 @@ func (p *Player) playTrack(id int) {
 		return
 	}
 
-	p.setVolume(int(p.volSlider.Value * 100))
+	p.setVolume(p.settings.Volume)
 	C.libvlc_media_player_play(p.mediaPlayer)
 	p.statusMsg = ""
 	p.settings.LastTrackURL = track.URL
 	saveSettings(p.settings)
+	p.refreshUI()
 }
 
 func (p *Player) stopPlayback() {
@@ -80,6 +81,7 @@ func (p *Player) stopPlayback() {
 	p.playingIdx = -1
 	p.settings.LastTrackURL = ""
 	saveSettings(p.settings)
+	p.refreshUI()
 }
 
 func (p *Player) setVolume(vol int) {
@@ -92,12 +94,15 @@ func (p *Player) toggleMute() {
 	if p.isMuted {
 		p.isMuted = false
 		p.setVolume(p.savedVolume)
-		p.volSlider.Value = float32(p.savedVolume) / 100.0
+		if p.volumeScale != nil {
+			p.volumeScale.SetValue(float64(p.savedVolume))
+		}
 	} else {
 		p.isMuted = true
-		p.savedVolume = int(p.volSlider.Value * 100)
+		p.savedVolume = p.settings.Volume
 		p.setVolume(0)
 	}
+	p.refreshUI()
 }
 
 func (p *Player) isPlayingTrack(track Track) bool {
@@ -197,6 +202,8 @@ func (p *Player) loadPlaylist(filename string) bool {
 	}
 	p.settings.LastFile = absPath
 	saveSettings(p.settings)
+	p.rebuildStationList()
+	p.refreshUI()
 	return true
 }
 
@@ -270,45 +277,9 @@ func parseXSPF(filename string) ([]Track, error) {
 	return tracks, nil
 }
 
-// --- File dialog ---
+// --- Desktop identity ---
 
-func (p *Player) pickFile() {
-	startDir := ""
-	if p.settings.LastFile != "" {
-		startDir = filepath.Dir(p.settings.LastFile)
-	}
-	path := openFileDialog(startDir)
-	if path != "" {
-		p.pendingFile <- path
-		p.window.Invalidate()
-	}
-}
-
-func openFileDialog(startDir string) string {
-	if startDir == "" {
-		startDir, _ = os.UserHomeDir()
-	}
-	if _, err := os.Stat(startDir); err != nil {
-		startDir, _ = os.UserHomeDir()
-	}
-	out, err := exec.Command("zenity", "--file-selection",
-		"--title=Open Playlist",
-		"--file-filter=Playlist Files (m3u, m3u8, xspf)|*.m3u *.m3u8 *.xspf",
-		"--file-filter=All Files|*",
-		"--filename="+startDir+"/").Output()
-	if err == nil {
-		return strings.TrimSpace(string(out))
-	}
-	out, err = exec.Command("kdialog", "--getopenfilename", startDir, "*.m3u *.m3u8 *.xspf|Playlist Files (m3u, m3u8, xspf)").Output()
-	if err == nil {
-		return strings.TrimSpace(string(out))
-	}
-	return ""
-}
-
-// --- Desktop entry ---
-
-func installDesktopEntry(iconData []byte) bool {
+func writeUserDesktopIdentity() bool {
 	if runtime.GOOS != "linux" {
 		return false
 	}
@@ -319,14 +290,18 @@ func installDesktopEntry(iconData []byte) bool {
 
 	desktopDir := filepath.Join(home, ".local", "share", "applications")
 	iconDir := filepath.Join(home, ".local", "share", "icons", "hicolor", "256x256", "apps")
-	pixmapsDir := filepath.Join(home, ".local", "share", "pixmaps")
 
 	os.MkdirAll(desktopDir, 0755)
 	os.MkdirAll(iconDir, 0755)
-	os.MkdirAll(pixmapsDir, 0755)
 
-	os.WriteFile(filepath.Join(iconDir, "radioplayer.png"), iconData, 0644)
-	os.WriteFile(filepath.Join(pixmapsDir, "radioplayer.png"), iconData, 0644)
+	iconData, err := iconFS.ReadFile("icon.png")
+	if err != nil {
+		return false
+	}
+	iconPath := filepath.Join(iconDir, appID+".png")
+	if err := os.WriteFile(iconPath, iconData, 0644); err != nil {
+		return false
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -335,22 +310,34 @@ func installDesktopEntry(iconData []byte) bool {
 	os.Chmod(exe, 0755)
 
 	desktop := fmt.Sprintf(`[Desktop Entry]
-Name=Radio Player
-Comment=Simple Radio Player
-Exec=%s
-Icon=radioplayer
-Terminal=false
 Type=Application
+Name=%s
+Comment=Simple Radio Player
+Exec=%s %%u
+Icon=%s
+Terminal=false
 Categories=AudioVideo;Audio;
 StartupNotify=true
-StartupWMClass=radioplayer
-`, exe)
+StartupWMClass=%s
+`, appName, strconv.Quote(exe), iconPath, appID)
 
-	if err := os.WriteFile(filepath.Join(desktopDir, "radioplayer.desktop"), []byte(desktop), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(desktopDir, appID+".desktop"), []byte(desktop), 0644); err != nil {
 		return false
 	}
-
-	exec.Command("update-desktop-database", desktopDir).Run()
-	exec.Command("gtk-update-icon-cache", "-f", filepath.Join(home, ".local", "share", "icons", "hicolor")).Run()
 	return true
+}
+
+func (p *Player) cleanup() {
+	if p.mediaPlayer != nil {
+		C.libvlc_media_player_release(p.mediaPlayer)
+		p.mediaPlayer = nil
+	}
+	if p.media != nil {
+		C.libvlc_media_release(p.media)
+		p.media = nil
+	}
+	if p.instance != nil {
+		C.libvlc_release(p.instance)
+		p.instance = nil
+	}
 }

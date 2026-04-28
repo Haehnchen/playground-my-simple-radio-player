@@ -1,35 +1,27 @@
 # Radio Player
 
-A simple radio player with a GUI, built with Go, Fyne, and libVLC. Uses libVLC inline via CGO (no external VLC process spawned).
+A simple radio player with a native GTK 4 UI, built in Go. Playback uses libVLC inline via CGO.
 
 ## Features
 
 - Play internet radio streams from M3U8 playlists
 - Search/filter stations
 - Volume control
-- Automatically installs desktop entry on Linux
+- Mute, shuffle, and play/stop controls
+- Linux desktop identity for the dock icon
 
 ## Requirements
 
 - Go 1.21+
+- GTK 4 development files
+- GObject Introspection development files
 - VLC and libvlc development files
-- Fyne dependencies (see below)
 
 ### Linux (Debian/Ubuntu)
 
 ```bash
-sudo apt install libvlc-dev vlc libgl1-mesa-dev xorg-dev
+sudo apt install libgtk-4-dev gobject-introspection libgirepository1.0-dev libvlc-dev vlc
 ```
-
-### macOS
-
-```bash
-brew install vlc
-```
-
-### Windows
-
-Install VLC from https://www.videolan.org/vlc/
 
 ## Build
 

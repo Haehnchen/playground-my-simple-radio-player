@@ -3,6 +3,7 @@
 BINARY := radioplayer
 
 build:
+	pkg-config --exists gtk4
 	go build -o $(BINARY)
 
 clean:
