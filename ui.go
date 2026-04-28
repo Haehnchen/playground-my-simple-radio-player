@@ -140,6 +140,7 @@ func (p *Player) buildUI() {
 func (p *Player) titlebar() *gtk.HeaderBar {
 	header := gtk.NewHeaderBar()
 	header.SetShowTitleButtons(true)
+	header.AddCSSClass("compact-titlebar")
 
 	infoIcon := gtk.NewImageFromIconName("dialog-information-symbolic")
 	infoIcon.SetPixelSize(16)
@@ -225,7 +226,17 @@ func installAppCSS() {
 		return
 	}
 	provider := gtk.NewCSSProvider()
-	provider.LoadFromString(`
+provider.LoadFromString(`
+headerbar.compact-titlebar {
+  min-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+headerbar.compact-titlebar windowcontrols button {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 2px;
+}
 button.titlebar-info-button {
   min-width: 20px;
   min-height: 20px;
