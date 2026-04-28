@@ -10,15 +10,11 @@ typedef struct {
 	gchar *title;
 	guint bitrate;
 	guint nominal_bitrate;
-	gint rate;
-	gint channels;
 	guint version;
 } RadioStreamInfo;
 
 static void radio_start_bus_watch(GstElement *player);
 static void radio_stop_bus_watch(GstElement *player);
-static void radio_update_player_info_from_caps(GstElement *player, GstCaps *caps);
-static GstPadProbeReturn radio_on_audio_pad_event(GstPad *pad, GstPadProbeInfo *probe_info, gpointer data);
 
 static void radio_stream_info_free(gpointer data) {
 	RadioStreamInfo *info = data;
@@ -39,31 +35,7 @@ static void radio_set_bool_if_property(GObject *object, const char *name, gboole
 	}
 }
 
-static void radio_set_int_if_property(GObject *object, const char *name, gint value) {
-	if (radio_has_property(object, name)) {
-		g_object_set(object, name, value, NULL);
-	}
-}
-
 static void radio_set_uint_if_property(GObject *object, const char *name, guint value) {
-	if (radio_has_property(object, name)) {
-		g_object_set(object, name, value, NULL);
-	}
-}
-
-static void radio_set_int64_if_property(GObject *object, const char *name, gint64 value) {
-	if (radio_has_property(object, name)) {
-		g_object_set(object, name, value, NULL);
-	}
-}
-
-static void radio_set_uint64_if_property(GObject *object, const char *name, guint64 value) {
-	if (radio_has_property(object, name)) {
-		g_object_set(object, name, value, NULL);
-	}
-}
-
-static void radio_set_double_if_property(GObject *object, const char *name, gdouble value) {
 	if (radio_has_property(object, name)) {
 		g_object_set(object, name, value, NULL);
 	}
@@ -84,103 +56,40 @@ static void radio_on_source_setup(GstElement *bin, GstElement *source, gpointer 
 	radio_set_string_if_property(object, "user-agent", "Radio Player/1.0 GStreamer");
 }
 
-static void radio_on_pad_added(GstElement *src, GstPad *pad, gpointer data) {
-	GstElement *queue = GST_ELEMENT(data);
-	GstPad *sink = gst_element_get_static_pad(queue, "sink");
-	GstElement *player = GST_ELEMENT(gst_element_get_parent(src));
-	if (sink == NULL || gst_pad_is_linked(sink)) {
-		if (sink != NULL) {
-			gst_object_unref(sink);
-		}
-		if (player != NULL) {
-			gst_object_unref(player);
-		}
-		return;
-	}
-
-	gboolean is_audio = FALSE;
-	GstCaps *caps = gst_pad_get_current_caps(pad);
-	if (caps == NULL) {
-		caps = gst_pad_query_caps(pad, NULL);
-	}
-	if (caps != NULL && !gst_caps_is_empty(caps) && !gst_caps_is_any(caps)) {
-		GstStructure *structure = gst_caps_get_structure(caps, 0);
-		const char *name = gst_structure_get_name(structure);
-		if (name != NULL && g_str_has_prefix(name, "audio/")) {
-			is_audio = TRUE;
-		}
-	}
-	if (caps != NULL) {
-		gst_caps_unref(caps);
-	}
-	if (is_audio) {
-		gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, radio_on_audio_pad_event, player, NULL);
-		if (gst_pad_link(pad, sink) == GST_PAD_LINK_OK) {
-			caps = gst_pad_get_current_caps(pad);
-			if (caps != NULL) {
-				radio_update_player_info_from_caps(player, caps);
-				gst_caps_unref(caps);
-			}
-		}
-	}
-	gst_object_unref(sink);
-	if (player != NULL) {
-		gst_object_unref(player);
-	}
-}
-
 static GstElement* radio_new_pipeline(const char *uri) {
-	GstElement *pipeline = gst_pipeline_new("radio-player");
-	GstElement *source = gst_element_factory_make("uridecodebin", "source");
-	GstElement *queue = gst_element_factory_make("queue", "audio-buffer");
-	GstElement *convert = gst_element_factory_make("audioconvert", "convert");
-	GstElement *resample = gst_element_factory_make("audioresample", "resample");
-	GstElement *volume = gst_element_factory_make("volume", "radio-volume");
+	GstElement *pipeline = gst_element_factory_make("playbin", "radio-player");
 	GstElement *sink = gst_element_factory_make("autoaudiosink", "sink");
 
-	if (pipeline == NULL || source == NULL || queue == NULL || convert == NULL || resample == NULL || volume == NULL || sink == NULL) {
+	if (pipeline == NULL || sink == NULL) {
 		if (pipeline != NULL) {
 			gst_object_unref(pipeline);
 		}
 		return NULL;
 	}
 
-	g_object_set(G_OBJECT(source), "uri", uri, NULL);
-
-	g_object_set(G_OBJECT(queue),
-		"max-size-buffers", 0,
-		"max-size-bytes", 0,
-		"max-size-time", (guint64)(3 * GST_SECOND),
-		"min-threshold-time", (guint64)(1 * GST_SECOND),
-		"silent", TRUE,
+	g_object_set(G_OBJECT(sink),
+		"sync", FALSE,
 		NULL);
 
-	gst_bin_add_many(GST_BIN(pipeline), source, queue, convert, resample, volume, sink, NULL);
-	if (!gst_element_link_many(queue, convert, resample, volume, sink, NULL)) {
-		gst_object_unref(pipeline);
-		return NULL;
-	}
+	g_object_set(G_OBJECT(pipeline),
+		"uri", uri,
+		"audio-sink", sink,
+		"buffer-duration", (gint64)(5 * GST_SECOND),
+		"flags", (guint)(0x00000002 | 0x00000010 | 0x00000100),
+		NULL);
+
 	g_object_set_data_full(G_OBJECT(pipeline), "radio-info", g_new0(RadioStreamInfo, 1), radio_stream_info_free);
-	g_signal_connect(source, "source-setup", G_CALLBACK(radio_on_source_setup), NULL);
-	g_signal_connect(source, "pad-added", G_CALLBACK(radio_on_pad_added), queue);
+	g_signal_connect(pipeline, "source-setup", G_CALLBACK(radio_on_source_setup), NULL);
 	radio_start_bus_watch(pipeline);
 	return pipeline;
 }
 
 static void radio_set_volume(GstElement *player, double volume) {
-	GstElement *volume_element = gst_bin_get_by_name(GST_BIN(player), "radio-volume");
-	if (volume_element != NULL) {
-		g_object_set(G_OBJECT(volume_element), "volume", volume, NULL);
-		gst_object_unref(volume_element);
-	}
+	g_object_set(G_OBJECT(player), "volume", volume, NULL);
 }
 
 static void radio_set_mute(GstElement *player, gboolean muted) {
-	GstElement *volume_element = gst_bin_get_by_name(GST_BIN(player), "radio-volume");
-	if (volume_element != NULL) {
-		g_object_set(G_OBJECT(volume_element), "mute", muted, NULL);
-		gst_object_unref(volume_element);
-	}
+	g_object_set(G_OBJECT(player), "mute", muted, NULL);
 }
 
 static int radio_play(GstElement *player) {
@@ -228,54 +137,6 @@ static gboolean radio_update_info_from_tags(RadioStreamInfo *info, GstTagList *t
 		changed = TRUE;
 	}
 	return changed;
-}
-
-static gboolean radio_update_info_from_caps(RadioStreamInfo *info, GstCaps *caps) {
-	if (info == NULL || caps == NULL || gst_caps_is_empty(caps) || gst_caps_is_any(caps)) {
-		return FALSE;
-	}
-
-	GstStructure *structure = gst_caps_get_structure(caps, 0);
-	if (structure == NULL) {
-		return FALSE;
-	}
-
-	gboolean changed = FALSE;
-	gint rate = 0;
-	gint channels = 0;
-	if (gst_structure_get_int(structure, "rate", &rate) && info->rate != rate) {
-		info->rate = rate;
-		changed = TRUE;
-	}
-	if (gst_structure_get_int(structure, "channels", &channels) && info->channels != channels) {
-		info->channels = channels;
-		changed = TRUE;
-	}
-	return changed;
-}
-
-static void radio_update_player_info_from_caps(GstElement *player, GstCaps *caps) {
-	if (player == NULL) {
-		return;
-	}
-	RadioStreamInfo *info = g_object_get_data(G_OBJECT(player), "radio-info");
-	if (radio_update_info_from_caps(info, caps)) {
-		info->version++;
-	}
-}
-
-static GstPadProbeReturn radio_on_audio_pad_event(GstPad *pad, GstPadProbeInfo *probe_info, gpointer data) {
-	if ((GST_PAD_PROBE_INFO_TYPE(probe_info) & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM) == 0) {
-		return GST_PAD_PROBE_OK;
-	}
-
-	GstEvent *event = GST_PAD_PROBE_INFO_EVENT(probe_info);
-	if (event != NULL && GST_EVENT_TYPE(event) == GST_EVENT_CAPS) {
-		GstCaps *caps = NULL;
-		gst_event_parse_caps(event, &caps);
-		radio_update_player_info_from_caps((GstElement*)data, caps);
-	}
-	return GST_PAD_PROBE_OK;
 }
 
 static gboolean radio_on_bus_message(GstBus *bus, GstMessage *message, gpointer data) {
@@ -336,28 +197,6 @@ static char* radio_stream_info(GstElement *player) {
 			g_string_append(out, ", ");
 		}
 		g_string_append_printf(out, "%u kbps", bitrate / 1000);
-	}
-	if (info->rate > 0) {
-		if (out->len > 0) {
-			g_string_append(out, ", ");
-		}
-		if (info->rate % 1000 == 0) {
-			g_string_append_printf(out, "%d kHz", info->rate / 1000);
-		} else {
-			g_string_append_printf(out, "%.1f kHz", info->rate / 1000.0);
-		}
-	}
-	if (info->channels > 0) {
-		if (out->len > 0) {
-			g_string_append(out, ", ");
-		}
-		if (info->channels == 1) {
-			g_string_append(out, "mono");
-		} else if (info->channels == 2) {
-			g_string_append(out, "stereo");
-		} else {
-			g_string_append_printf(out, "%d ch", info->channels);
-		}
 	}
 	if (out->len == 0) {
 		g_string_free(out, TRUE);
