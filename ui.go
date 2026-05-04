@@ -59,7 +59,7 @@ func (p *Player) buildUI() {
 	top.Append(gtk.NewSeparator(gtk.OrientationHorizontal))
 
 	controls := gtk.NewBox(gtk.OrientationHorizontal, 6)
-	p.muteBtn = iconButton("xsi-audio-volume-high-symbolic", "Mute")
+	p.muteBtn = localIconButton("icons/volume-high.svg", "Mute")
 	p.volumeScale = gtk.NewScaleWithRange(gtk.OrientationHorizontal, 0, 100, 1)
 	p.volumeScale.SetDrawValue(false)
 	p.volumeScale.SetValue(float64(p.settings.Volume))
@@ -70,9 +70,9 @@ func (p *Player) buildUI() {
 		return p.scrollVolume(dy)
 	})
 	p.volumeScale.AddController(volumeScroll)
-	p.playBtn = iconButton("media-playback-start-symbolic", "Play")
-	shuffleBtn := iconButton("media-playlist-shuffle-symbolic", "Shuffle")
-	openBtn := iconButton("document-open-symbolic", "Open")
+	p.playBtn = localIconButton("icons/play.svg", "Play")
+	shuffleBtn := localIconButton("icons/shuffle.svg", "Shuffle")
+	openBtn := localIconButton("icons/open.svg", "Open")
 
 	p.muteBtn.ConnectClicked(func() { p.toggleMute() })
 	p.volumeScale.ConnectValueChanged(func() {
@@ -145,10 +145,8 @@ func (p *Player) titlebar() *gtk.HeaderBar {
 	header.SetShowTitleButtons(true)
 	header.AddCSSClass("compact-titlebar")
 
-	infoIcon := gtk.NewImageFromIconName("dialog-information-symbolic")
-	infoIcon.SetPixelSize(16)
 	infoBtn := gtk.NewButton()
-	infoBtn.SetChild(infoIcon)
+	setLocalButtonIcon(infoBtn, "icons/info.svg")
 	infoBtn.SetHasFrame(false)
 	infoBtn.SetFocusOnClick(false)
 	infoBtn.SetTooltipText("Info")
@@ -277,11 +275,31 @@ func setMargins(widget marginSetter, top, right, bottom, left int) {
 	widget.SetMarginEnd(right)
 }
 
-func iconButton(iconName, tooltip string) *gtk.Button {
-	button := gtk.NewButtonFromIconName(iconName)
+func localIconButton(iconPath, tooltip string) *gtk.Button {
+	button := gtk.NewButton()
+	setLocalButtonIcon(button, iconPath)
 	button.SetTooltipText(tooltip)
 	button.SetFocusOnClick(false)
 	return button
+}
+
+func setLocalButtonIcon(button *gtk.Button, iconPath string) {
+	button.SetChild(localIconImage(iconPath, 16))
+}
+
+func localIconImage(iconPath string, size int) *gtk.Image {
+	iconData, err := iconFS.ReadFile(iconPath)
+	if err != nil {
+		panic(fmt.Sprintf("load embedded icon %s: %v", iconPath, err))
+	}
+	stream := gio.NewMemoryInputStreamFromBytes(glib.NewBytes(iconData))
+	icon, err := gdkpixbuf.NewPixbufFromStreamAtScale(context.Background(), stream, size, size, true)
+	if err != nil {
+		panic(fmt.Sprintf("decode embedded icon %s: %v", iconPath, err))
+	}
+	image := gtk.NewImageFromPaintable(gdk.NewTextureForPixbuf(icon))
+	image.SetPixelSize(size)
+	return image
 }
 
 func (p *Player) scrollVolume(dy float64) bool {
@@ -365,15 +383,15 @@ func (p *Player) refreshUI() {
 	p.statusLabel.SetMarkup(p.currentStatusMarkup())
 	p.statusLabel.SetTooltipText(p.currentStatusTooltip())
 	if p.playingIdx >= 0 {
-		p.playBtn.SetIconName("media-playback-stop-symbolic")
+		setLocalButtonIcon(p.playBtn, "icons/stop.svg")
 	} else {
-		p.playBtn.SetIconName("media-playback-start-symbolic")
+		setLocalButtonIcon(p.playBtn, "icons/play.svg")
 	}
 	if p.isMuted {
-		p.muteBtn.SetIconName("xsi-audio-volume-muted-symbolic")
+		setLocalButtonIcon(p.muteBtn, "icons/volume-muted.svg")
 		p.muteBtn.SetTooltipText("Unmute")
 	} else {
-		p.muteBtn.SetIconName("xsi-audio-volume-high-symbolic")
+		setLocalButtonIcon(p.muteBtn, "icons/volume-high.svg")
 		p.muteBtn.SetTooltipText("Mute")
 	}
 	if len(p.filteredList) == 0 {

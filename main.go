@@ -12,7 +12,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
-//go:embed icon.png
+//go:embed icon.png icons/*.svg
 var iconFS embed.FS
 
 const (
