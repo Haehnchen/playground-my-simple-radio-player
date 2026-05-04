@@ -9,15 +9,35 @@ package main
 #include <string.h>
 #include <vlc/vlc.h>
 
+#define RADIO_NETWORK_CACHING_MS "1000"
+
 static libvlc_instance_t* radio_new_vlc_instance(void) {
 	const char *args[] = {
 		"--no-video",
-		"--network-caching=1000",
-		"--file-caching=1000",
-		"--live-caching=1000",
+		"--network-caching=" RADIO_NETWORK_CACHING_MS,
+		"--file-caching=" RADIO_NETWORK_CACHING_MS,
+		"--live-caching=" RADIO_NETWORK_CACHING_MS,
+		"--http-reconnect",
+		"--ipv4-timeout=5000",
+		"--no-metadata-network-access",
 		"--no-xlib"
 	};
-	return libvlc_new(5, args);
+	return libvlc_new(sizeof(args) / sizeof(args[0]), args);
+}
+
+static void radio_media_add_playback_options(libvlc_media_t *media) {
+	const char *options[] = {
+		":network-caching=" RADIO_NETWORK_CACHING_MS,
+		":http-reconnect"
+	};
+
+	if (media == NULL) {
+		return;
+	}
+
+	for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
+		libvlc_media_add_option(media, options[i]);
+	}
 }
 
 static char* radio_media_meta(libvlc_media_t *media, libvlc_meta_t meta) {
@@ -51,6 +71,7 @@ static void radio_append_info_part(char *target, size_t target_size, const char 
 }
 
 static void radio_codec_name(uint32_t codec, char *target, size_t target_size) {
+	const char *description = libvlc_media_get_codec_description(libvlc_track_audio, codec);
 	char fourcc[5] = {
 		(char)(codec & 0xff),
 		(char)((codec >> 8) & 0xff),
@@ -59,6 +80,11 @@ static void radio_codec_name(uint32_t codec, char *target, size_t target_size) {
 		'\0'
 	};
 	size_t len = 4;
+
+	if (description != NULL && description[0] != '\0') {
+		snprintf(target, target_size, "%s", description);
+		return;
+	}
 
 	for (int i = 0; i < 4; i++) {
 		if (fourcc[i] == '\0' || !isprint((unsigned char)fourcc[i])) {
@@ -70,17 +96,7 @@ static void radio_codec_name(uint32_t codec, char *target, size_t target_size) {
 		len--;
 	}
 
-	if (strcmp(fourcc, "mp4a") == 0 || strcmp(fourcc, "aac") == 0) {
-		snprintf(target, target_size, "AAC");
-	} else if (strcmp(fourcc, "mpga") == 0 || strcmp(fourcc, ".mp3") == 0 || strcmp(fourcc, "mp3") == 0) {
-		snprintf(target, target_size, "MP3");
-	} else if (strcmp(fourcc, "opus") == 0) {
-		snprintf(target, target_size, "Opus");
-	} else if (strcmp(fourcc, "vorb") == 0) {
-		snprintf(target, target_size, "Vorbis");
-	} else if (strcmp(fourcc, "flac") == 0) {
-		snprintf(target, target_size, "FLAC");
-	} else if (fourcc[0] != '\0') {
+	if (fourcc[0] != '\0') {
 		snprintf(target, target_size, "%s", fourcc);
 	} else {
 		snprintf(target, target_size, "Audio");
@@ -209,9 +225,7 @@ func (p *Player) playTrack(id int) {
 		return
 	}
 
-	cache := C.CString(":network-caching=1000")
-	C.libvlc_media_add_option(media, cache)
-	C.free(unsafe.Pointer(cache))
+	C.radio_media_add_playback_options(media)
 
 	player := C.libvlc_media_player_new_from_media(media)
 	if player == nil {
