@@ -122,18 +122,6 @@ func (p *Player) buildUI() {
 	scroller.SetVExpand(true)
 	p.stationList = gtk.NewListBox()
 	p.stationList.SetSelectionMode(gtk.SelectionNone)
-	p.stationList.ConnectRowActivated(func(row *gtk.ListBoxRow) {
-		track, ok := p.rowTracks[row]
-		if !ok {
-			return
-		}
-		for i, candidate := range p.filteredList {
-			if candidate.URL == track.URL {
-				p.playTrack(i)
-				return
-			}
-		}
-	})
 	scroller.SetChild(p.stationList)
 	root.Append(scroller)
 
@@ -288,6 +276,12 @@ func setLocalButtonIcon(button *gtk.Button, iconPath string) {
 }
 
 func localIconImage(iconPath string, size int) *gtk.Image {
+	key := fmt.Sprintf("%s:%d", iconPath, size)
+	if paintable, ok := localIconPaintables[key]; ok {
+		image := gtk.NewImageFromPaintable(paintable)
+		image.SetPixelSize(size)
+		return image
+	}
 	iconData, err := iconFS.ReadFile(iconPath)
 	if err != nil {
 		panic(fmt.Sprintf("load embedded icon %s: %v", iconPath, err))
@@ -297,10 +291,14 @@ func localIconImage(iconPath string, size int) *gtk.Image {
 	if err != nil {
 		panic(fmt.Sprintf("decode embedded icon %s: %v", iconPath, err))
 	}
-	image := gtk.NewImageFromPaintable(gdk.NewTextureForPixbuf(icon))
+	paintable := gdk.NewTextureForPixbuf(icon)
+	localIconPaintables[key] = paintable
+	image := gtk.NewImageFromPaintable(paintable)
 	image.SetPixelSize(size)
 	return image
 }
+
+var localIconPaintables = make(map[string]gdk.Paintabler)
 
 func (p *Player) scrollVolume(dy float64) bool {
 	const step = 3
@@ -350,20 +348,14 @@ func (p *Player) setVolumeScaleValue(vol int) {
 
 func (p *Player) rebuildStationList() {
 	p.stationList.RemoveAll()
-	p.rowTracks = make(map[*gtk.ListBoxRow]Track, len(p.filteredList))
-	for _, track := range p.filteredList {
-		track := track
+	for id, track := range p.filteredList {
+		stationID := id
 		row := gtk.NewListBoxRow()
 		row.SetActivatable(true)
 		click := gtk.NewGestureClick()
 		click.SetButton(1)
 		click.ConnectPressed(func(_ int, _, _ float64) {
-			for i, candidate := range p.filteredList {
-				if candidate.URL == track.URL {
-					p.playTrack(i)
-					return
-				}
-			}
+			p.playTrack(stationID)
 		})
 		row.AddController(click)
 		label := gtk.NewLabel(track.Name)
@@ -371,7 +363,6 @@ func (p *Player) rebuildStationList() {
 		label.SetEllipsize(pango.EllipsizeEnd)
 		setMargin(label, 4)
 		row.SetChild(label)
-		p.rowTracks[row] = track
 		p.stationList.Append(row)
 	}
 }

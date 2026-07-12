@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"unsafe"
 
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	glib "github.com/diamondburned/gotk4/pkg/glib/v2"
@@ -32,8 +31,7 @@ type Settings struct {
 }
 
 type Player struct {
-	mediaPlayer unsafe.Pointer
-	media       unsafe.Pointer
+	audio *audioBackend
 
 	playlist      []Track
 	filteredList  []Track
@@ -45,8 +43,9 @@ type Player struct {
 	statusMsg     string
 	streamInfo    string
 	streamTitle   string
-	streamVersion uint
+	playVersion   uint64
 	infoPoll      glib.SourceHandle
+	infoPending   bool
 	settingsDirty bool
 
 	app         *gtk.Application
@@ -58,7 +57,6 @@ type Player struct {
 	searchEntry *gtk.SearchEntry
 	countLabel  *gtk.Label
 	stationList *gtk.ListBox
-	rowTracks   map[*gtk.ListBoxRow]Track
 }
 
 func main() {
@@ -70,7 +68,8 @@ func main() {
 	glib.SetApplicationName(appName)
 	writeUserDesktopIdentity()
 
-	if !initAudioBackend() {
+	audio := initAudioBackend()
+	if audio == nil {
 		fmt.Fprintln(os.Stderr, "Failed to init VLC. Install: sudo apt install libvlc-dev vlc")
 		os.Exit(1)
 	}
@@ -79,13 +78,13 @@ func main() {
 	p := &Player{
 		playingIdx: -1,
 		settings:   settings,
+		audio:      audio,
 		savedVolume: func() int {
 			if settings.Volume <= 0 {
 				return 75
 			}
 			return settings.Volume
 		}(),
-		rowTracks: make(map[*gtk.ListBoxRow]Track),
 	}
 
 	app := gtk.NewApplication(appID, gio.ApplicationDefaultFlags)

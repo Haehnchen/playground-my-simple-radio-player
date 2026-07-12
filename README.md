@@ -19,7 +19,7 @@ A simple radio player with a native GTK 4 UI, built in Go. Playback uses libVLC 
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.25+
 - Build tools (`gcc`, `make`, `pkg-config`)
 - GTK 4 development files
 - GObject Introspection development files

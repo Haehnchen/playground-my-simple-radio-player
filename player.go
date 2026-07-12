@@ -184,20 +184,225 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"unsafe"
 
 	glib "github.com/diamondburned/gotk4/pkg/glib/v2"
 )
 
-var vlcInstance unsafe.Pointer
+type audioCommandType uint8
 
-func initAudioBackend() bool {
+const (
+	audioPlay audioCommandType = iota
+	audioStop
+	audioSetVolume
+	audioSetMuted
+	audioReadMetadata
+	audioClose
+)
+
+type audioMetadata struct {
+	info  string
+	title string
+}
+
+type audioCommand struct {
+	kind         audioCommandType
+	url          string
+	volume       int
+	muted        bool
+	playDone     func(string)
+	metadataDone func(audioMetadata)
+}
+
+type audioBackend struct {
+	instance *C.libvlc_instance_t
+	player   *C.libvlc_media_player_t
+	media    *C.libvlc_media_t
+
+	mu     sync.Mutex
+	queue  []audioCommand
+	wake   chan struct{}
+	done   chan struct{}
+	closed bool
+}
+
+func initAudioBackend() *audioBackend {
 	instance := C.radio_new_vlc_instance()
 	if instance == nil {
+		return nil
+	}
+	backend := &audioBackend{
+		instance: instance,
+		wake:     make(chan struct{}, 1),
+		done:     make(chan struct{}),
+	}
+	go backend.run()
+	return backend
+}
+
+func (a *audioBackend) enqueue(command audioCommand) bool {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
 		return false
 	}
-	vlcInstance = unsafe.Pointer(instance)
+	if command.kind == audioClose {
+		a.closed = true
+	}
+	if command.kind == audioPlay || command.kind == audioStop || command.kind == audioClose {
+		for i := range a.queue {
+			a.queue[i] = audioCommand{}
+		}
+		a.queue = append(a.queue[:0], command)
+		a.mu.Unlock()
+		select {
+		case a.wake <- struct{}{}:
+		default:
+		}
+		return true
+	}
+	if command.kind == audioSetVolume || command.kind == audioSetMuted {
+		for i := len(a.queue) - 1; i >= 0; i-- {
+			queued := a.queue[i]
+			if queued.kind == command.kind {
+				a.queue[i] = command
+				a.mu.Unlock()
+				return true
+			}
+		}
+	}
+	a.queue = append(a.queue, command)
+	a.mu.Unlock()
+
+	select {
+	case a.wake <- struct{}{}:
+	default:
+	}
 	return true
+}
+
+func (a *audioBackend) nextCommand() audioCommand {
+	for {
+		a.mu.Lock()
+		if len(a.queue) > 0 {
+			command := a.queue[0]
+			a.queue[0] = audioCommand{}
+			a.queue = a.queue[1:]
+			a.mu.Unlock()
+			return command
+		}
+		a.mu.Unlock()
+		<-a.wake
+	}
+}
+
+func (a *audioBackend) run() {
+	for {
+		command := a.nextCommand()
+		switch command.kind {
+		case audioPlay:
+			a.releaseMedia()
+			errorMessage := a.startMedia(command.url, command.volume, command.muted)
+			dispatchToUI(func() { command.playDone(errorMessage) })
+		case audioStop:
+			a.releaseMedia()
+		case audioSetVolume:
+			if a.player != nil {
+				C.libvlc_audio_set_volume(a.player, C.int(command.volume))
+			}
+		case audioSetMuted:
+			if a.player != nil {
+				C.libvlc_audio_set_mute(a.player, C.int(boolToInt(command.muted)))
+			}
+		case audioReadMetadata:
+			metadata := a.metadata()
+			dispatchToUI(func() { command.metadataDone(metadata) })
+		case audioClose:
+			a.releaseMedia()
+			C.libvlc_release(a.instance)
+			close(a.done)
+			return
+		}
+	}
+}
+
+func (a *audioBackend) startMedia(url string, volume int, muted bool) string {
+	curl := C.CString(url)
+	defer C.free(unsafe.Pointer(curl))
+
+	media := C.libvlc_media_new_location(a.instance, curl)
+	if media == nil {
+		return "Error loading stream"
+	}
+	C.radio_media_add_playback_options(media)
+
+	player := C.libvlc_media_player_new_from_media(media)
+	if player == nil {
+		C.libvlc_media_release(media)
+		return "Error creating player"
+	}
+	C.libvlc_audio_set_volume(player, C.int(volume))
+	C.libvlc_audio_set_mute(player, C.int(boolToInt(muted)))
+	if C.libvlc_media_player_play(player) != 0 {
+		C.libvlc_media_player_release(player)
+		C.libvlc_media_release(media)
+		return "Error starting stream"
+	}
+
+	a.media = media
+	a.player = player
+	return ""
+}
+
+func (a *audioBackend) releaseMedia() {
+	if a.player != nil {
+		C.libvlc_media_player_stop(a.player)
+		C.libvlc_media_player_release(a.player)
+		a.player = nil
+	}
+	if a.media != nil {
+		C.libvlc_media_release(a.media)
+		a.media = nil
+	}
+}
+
+func (a *audioBackend) play(url string, volume int, muted bool, done func(string)) {
+	a.enqueue(audioCommand{kind: audioPlay, url: url, volume: volume, muted: muted, playDone: done})
+}
+
+func (a *audioBackend) stop() {
+	a.enqueue(audioCommand{kind: audioStop})
+}
+
+func (a *audioBackend) setVolume(volume int) {
+	a.enqueue(audioCommand{kind: audioSetVolume, volume: volume})
+}
+
+func (a *audioBackend) setMuted(muted bool) {
+	a.enqueue(audioCommand{kind: audioSetMuted, muted: muted})
+}
+
+func (a *audioBackend) readMetadata(done func(audioMetadata)) bool {
+	return a.enqueue(audioCommand{kind: audioReadMetadata, metadataDone: done})
+}
+
+func (a *audioBackend) close() {
+	if a == nil {
+		return
+	}
+	if a.enqueue(audioCommand{kind: audioClose}) {
+		<-a.done
+		return
+	}
+	<-a.done
+}
+
+func dispatchToUI(callback func()) {
+	if callback == nil {
+		return
+	}
+	glib.IdleAdd(callback)
 }
 
 func (p *Player) playTrack(id int) {
@@ -206,83 +411,59 @@ func (p *Player) playTrack(id int) {
 	}
 	track := p.filteredList[id]
 
+	playlistIndex := -1
 	for i, t := range p.playlist {
 		if t.URL == track.URL {
-			p.playingIdx = i
+			playlistIndex = i
 			break
 		}
 	}
-
-	p.releaseCurrentMedia()
-
-	curl := C.CString(track.URL)
-	defer C.free(unsafe.Pointer(curl))
-
-	media := C.libvlc_media_new_location((*C.libvlc_instance_t)(vlcInstance), curl)
-	if media == nil {
-		p.statusMsg = "Error loading " + track.Name
-		p.playingIdx = -1
+	if playlistIndex < 0 {
 		return
 	}
 
-	C.radio_media_add_playback_options(media)
-
-	player := C.libvlc_media_player_new_from_media(media)
-	if player == nil {
-		C.libvlc_media_release(media)
-		p.statusMsg = "Error creating player"
-		p.playingIdx = -1
-		return
-	}
-	p.media = unsafe.Pointer(media)
-	p.mediaPlayer = unsafe.Pointer(player)
-	p.setVolume(p.settings.Volume)
-	p.setMuted(p.isMuted)
-	if C.libvlc_media_player_play(player) != 0 {
-		p.statusMsg = "Error playing " + track.Name
-		p.playingIdx = -1
-		p.releaseCurrentMedia()
-		return
-	}
-	p.statusMsg = ""
+	p.playVersion++
+	version := p.playVersion
+	p.stopStreamInfoPolling()
+	p.infoPending = false
+	p.playingIdx = playlistIndex
+	p.statusMsg = "Loading " + track.Name + "..."
 	p.streamInfo = ""
 	p.streamTitle = ""
-	p.streamVersion = 0
-	p.settings.LastTrackURL = track.URL
-	saveSettings(p.settings)
 	p.refreshUI()
-	p.startStreamInfoPolling()
-}
-
-func (p *Player) releaseCurrentMedia() {
-	p.stopStreamInfoPolling()
-	if p.mediaPlayer != nil {
-		player := (*C.libvlc_media_player_t)(p.mediaPlayer)
-		C.libvlc_media_player_stop(player)
-		C.libvlc_media_player_release(player)
-		p.mediaPlayer = nil
-	}
-	if p.media != nil {
-		C.libvlc_media_release((*C.libvlc_media_t)(p.media))
-		p.media = nil
-	}
+	p.audio.play(track.URL, p.settings.Volume, p.isMuted, func(errorMessage string) {
+		if version != p.playVersion {
+			return
+		}
+		if errorMessage != "" {
+			p.statusMsg = errorMessage + ": " + track.Name
+			p.playingIdx = -1
+			p.refreshUI()
+			return
+		}
+		p.statusMsg = ""
+		p.settings.LastTrackURL = track.URL
+		saveSettings(p.settings)
+		p.refreshUI()
+		p.startStreamInfoPolling()
+	})
 }
 
 func (p *Player) stopPlayback() {
-	p.releaseCurrentMedia()
+	p.playVersion++
+	p.stopStreamInfoPolling()
+	p.infoPending = false
+	p.audio.stop()
 	p.playingIdx = -1
 	p.streamInfo = ""
 	p.streamTitle = ""
-	p.streamVersion = 0
 	p.settings.LastTrackURL = ""
 	saveSettings(p.settings)
 	p.refreshUI()
 }
 
 func (p *Player) setVolume(vol int) {
-	if p.mediaPlayer != nil {
-		C.libvlc_audio_set_volume((*C.libvlc_media_player_t)(p.mediaPlayer), C.int(vol))
-	}
+	p.audio.setVolume(vol)
 }
 
 func (p *Player) toggleMute() {
@@ -305,9 +486,7 @@ func (p *Player) toggleMute() {
 }
 
 func (p *Player) setMuted(muted bool) {
-	if p.mediaPlayer != nil {
-		C.libvlc_audio_set_mute((*C.libvlc_media_player_t)(p.mediaPlayer), C.int(boolToInt(muted)))
-	}
+	p.audio.setMuted(muted)
 }
 
 func (p *Player) isPlayingTrack(track Track) bool {
@@ -572,11 +751,8 @@ func (p *Player) cleanup() {
 		saveSettings(p.settings)
 		p.settingsDirty = false
 	}
-	p.releaseCurrentMedia()
-	if vlcInstance != nil {
-		C.libvlc_release((*C.libvlc_instance_t)(vlcInstance))
-		vlcInstance = nil
-	}
+	p.stopStreamInfoPolling()
+	p.audio.close()
 }
 
 func boolToInt(value bool) int {
@@ -588,22 +764,39 @@ func boolToInt(value bool) int {
 
 func (p *Player) startStreamInfoPolling() {
 	p.stopStreamInfoPolling()
+	version := p.playVersion
 	p.infoPoll = glib.TimeoutAdd(1000, func() bool {
-		if p.playingIdx < 0 || p.media == nil {
+		if version != p.playVersion || p.playingIdx < 0 {
 			p.infoPoll = 0
 			return false
 		}
-		changed := false
-		if info := p.readStreamInfo(); info != "" && info != p.streamInfo {
-			p.streamInfo = info
-			changed = true
+		if p.infoPending {
+			return true
 		}
-		if title := p.readStreamTitle(); title != p.streamTitle {
-			p.streamTitle = title
-			changed = true
-		}
-		if changed {
-			p.refreshUI()
+		p.infoPending = true
+		if !p.audio.readMetadata(func(metadata audioMetadata) {
+			if version != p.playVersion {
+				return
+			}
+			p.infoPending = false
+			changed := false
+			if metadata.info != "" && metadata.info != p.streamInfo {
+				p.streamInfo = metadata.info
+				changed = true
+			}
+			title := cleanStreamTitle(metadata.title)
+			if p.streamTitleMatchesStation(title) {
+				title = ""
+			}
+			if title != p.streamTitle {
+				p.streamTitle = title
+				changed = true
+			}
+			if changed {
+				p.refreshUI()
+			}
+		}) {
+			p.infoPending = false
 		}
 		return true
 	})
@@ -616,11 +809,20 @@ func (p *Player) stopStreamInfoPolling() {
 	}
 }
 
-func (p *Player) readStreamInfo() string {
-	if p.media == nil {
-		return ""
+func (a *audioBackend) metadata() audioMetadata {
+	if a.media == nil {
+		return audioMetadata{}
 	}
-	value := C.radio_stream_info((*C.libvlc_media_t)(p.media))
+	metadata := audioMetadata{info: readStreamInfo(a.media)}
+	metadata.title = readMediaMeta(a.media, C.libvlc_meta_NowPlaying)
+	if metadata.title == "" {
+		metadata.title = readMediaMeta(a.media, C.libvlc_meta_Title)
+	}
+	return metadata
+}
+
+func readStreamInfo(media *C.libvlc_media_t) string {
+	value := C.radio_stream_info(media)
 	if value == nil {
 		return ""
 	}
@@ -628,26 +830,8 @@ func (p *Player) readStreamInfo() string {
 	return C.GoString(value)
 }
 
-func (p *Player) readStreamTitle() string {
-	title := p.readVLCMeta(C.libvlc_meta_NowPlaying)
-	if title == "" {
-		title = p.readVLCMeta(C.libvlc_meta_Title)
-	}
-	if title == "" {
-		return ""
-	}
-	cleaned := cleanStreamTitle(title)
-	if p.streamTitleMatchesStation(cleaned) {
-		return ""
-	}
-	return cleaned
-}
-
-func (p *Player) readVLCMeta(meta C.libvlc_meta_t) string {
-	if p.media == nil {
-		return ""
-	}
-	value := C.radio_media_meta((*C.libvlc_media_t)(p.media), meta)
+func readMediaMeta(media *C.libvlc_media_t, meta C.libvlc_meta_t) string {
+	value := C.radio_media_meta(media, meta)
 	if value == nil {
 		return ""
 	}
